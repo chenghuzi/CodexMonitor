@@ -92,6 +92,8 @@
   cursor: pointer;
   transition: all 0.2s ease;
   overflow-x: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .workspace-row::before {

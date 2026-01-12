@@ -52,6 +52,7 @@ type MainAppProps = {
   onAccessModeChange: (mode: AccessMode) => void;
   sidebarWidth: number;
   onSidebarWidthChange: (width: number) => void;
+  enableCompletionNotifications: boolean;
 };
 
 const SIDEBAR_MIN_WIDTH = 220;
@@ -69,6 +70,7 @@ function MainApp({
   onAccessModeChange,
   sidebarWidth: persistedSidebarWidth,
   onSidebarWidthChange,
+  enableCompletionNotifications,
 }: MainAppProps) {
   const [centerMode, setCenterMode] = useState<"chat" | "diff">("chat");
   const [selectedDiffPath, setSelectedDiffPath] = useState<string | null>(null);
@@ -128,6 +130,10 @@ function MainApp({
       ? `${gitStatus.files.length} file${gitStatus.files.length === 1 ? "" : "s"} changed`
       : "Working tree clean";
 
+  const openThreadRef = useRef<
+    (workspaceId: string, threadId: string) => void
+  >(() => {});
+
   const {
     setActiveThreadId,
     activeThreadId,
@@ -135,7 +141,8 @@ function MainApp({
     approvals,
     threadsByWorkspace,
     threadStatusById,
-    removeThread,
+    renameThread,
+    setThreadArchived,
     startThreadForWorkspace,
     listThreadsForWorkspace,
     sendUserMessage,
@@ -149,6 +156,13 @@ function MainApp({
     effort: selectedEffort,
     accessMode,
     onMessageActivity: refreshGitStatus,
+    notifications: {
+      enabled: enableCompletionNotifications,
+      workspaces,
+      onOpenThread: (workspaceId, threadId) => {
+        openThreadRef.current(workspaceId, threadId);
+      },
+    },
   });
 
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -322,6 +336,18 @@ function MainApp({
     setSelectedDiffPath(null);
   }
 
+  const handleSelectThread = useCallback(
+    (workspaceId: string, threadId: string) => {
+      setCenterMode("chat");
+      setSelectedDiffPath(null);
+      setActiveWorkspaceId(workspaceId);
+      setActiveThreadId(threadId, workspaceId);
+    },
+    [setActiveThreadId, setActiveWorkspaceId],
+  );
+
+  openThreadRef.current = handleSelectThread;
+
   async function handleAddAgent(workspace: (typeof workspaces)[number]) {
     exitDiffView();
     setActiveWorkspaceId(workspace.id);
@@ -460,13 +486,12 @@ function MainApp({
         }}
         onConnectWorkspace={connectWorkspace}
         onAddAgent={handleAddAgent}
-        onSelectThread={(workspaceId, threadId) => {
-          exitDiffView();
-          setActiveWorkspaceId(workspaceId);
-          setActiveThreadId(threadId, workspaceId);
+        onSelectThread={handleSelectThread}
+        onRenameThread={(workspaceId, threadId, name) => {
+          void renameThread(workspaceId, threadId, name);
         }}
-        onDeleteThread={(workspaceId, threadId) => {
-          removeThread(workspaceId, threadId);
+        onArchiveThread={(workspaceId, threadId, archived) => {
+          void setThreadArchived(workspaceId, threadId, archived);
         }}
       />
       <div
@@ -656,6 +681,7 @@ function App() {
       onAccessModeChange={(mode) => updateSettings({ accessMode: mode })}
       sidebarWidth={settings.sidebarWidth}
       onSidebarWidthChange={(width) => updateSettings({ sidebarWidth: width })}
+      enableCompletionNotifications={settings.enableCompletionNotifications}
     />
   );
 }

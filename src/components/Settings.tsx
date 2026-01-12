@@ -120,6 +120,27 @@ export function Settings({ settings, onUpdateSettings }: SettingsProps) {
             </div>
           </div>
           <div className="settings-card">
+            <div className="settings-card-title">Notifications</div>
+            <div className="settings-toggle">
+              <input
+                id="completion-notifications"
+                type="checkbox"
+                checked={settings.enableCompletionNotifications}
+                onChange={(event) =>
+                  onUpdateSettings({
+                    enableCompletionNotifications: event.target.checked,
+                  })
+                }
+              />
+              <label htmlFor="completion-notifications">
+                Notify when an agent finishes a reply
+              </label>
+            </div>
+            <div className="settings-help">
+              Clicking the notification opens the related thread.
+            </div>
+          </div>
+          <div className="settings-card">
             <div className="settings-card-title">Advanced runtime flags</div>
             <div className="settings-toggle">
               <input

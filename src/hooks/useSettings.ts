@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   bypassApprovalsAndSandbox: false,
   enableWebSearchRequest: false,
   confirmBeforeQuit: false,
+  enableCompletionNotifications: false,
   sidebarWidth: 280,
 };
 

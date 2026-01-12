@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AppSettings, LocalImageInput, WorkspaceInfo } from "../types";
+import type {
+  AppSettings,
+  LocalImageInput,
+  WorkspaceInfo,
+  WorkspaceSessionStore,
+} from "../types";
 import type { GitFileDiff, GitFileStatus, ReviewTarget } from "../types";
 import type { PromptFile, PromptOption } from "../types";
 
@@ -135,6 +140,22 @@ export async function resumeThread(workspaceId: string, threadId: string) {
 
 export async function archiveThread(workspaceId: string, threadId: string) {
   return invoke<any>("archive_thread", { workspaceId, threadId });
+}
+
+export async function getWorkspaceSessions(
+  workspaceId: string,
+): Promise<WorkspaceSessionStore> {
+  return invoke<WorkspaceSessionStore>("get_workspace_sessions", { workspaceId });
+}
+
+export async function saveWorkspaceSessions(
+  workspaceId: string,
+  sessions: WorkspaceSessionStore,
+): Promise<WorkspaceSessionStore> {
+  return invoke<WorkspaceSessionStore>("save_workspace_sessions", {
+    workspaceId,
+    sessions,
+  });
 }
 
 export async function getSettings(): Promise<AppSettings> {

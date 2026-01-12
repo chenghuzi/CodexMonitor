@@ -24,3 +24,4 @@ dist-ssr
 *.sw?
 .codex_schema
 .codex
+.codexmonitor

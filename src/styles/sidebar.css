@@ -166,6 +166,40 @@
   margin-left: 12px;
 }
 
+.thread-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-left: 12px;
+}
+
+.thread-section .thread-list {
+  margin-left: 0;
+}
+
+.thread-section-toggle {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-align: left;
+  padding: 2px 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.thread-section-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.thread-section-chevron {
+  width: 10px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
 .thread-row {
   display: flex;
   align-items: center;
@@ -215,6 +249,10 @@
 .thread-row.active {
   background: var(--accent-soft);
   color: var(--text-primary);
+}
+
+.thread-row.archived {
+  opacity: 0.7;
 }
 
 .thread-name {

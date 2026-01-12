@@ -1,10 +1,14 @@
-import { useCallback, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   ApprovalRequest,
   ConversationItem,
   DebugEntry,
   LocalImageInput,
+  SessionMetadata,
+  SessionNameSource,
   ThreadSummary,
+  WorkspaceSessionStore,
   WorkspaceInfo,
 } from "../types";
 import {
@@ -14,11 +18,49 @@ import {
   startThread as startThreadService,
   listThreads as listThreadsService,
   resumeThread as resumeThreadService,
-  archiveThread as archiveThreadService,
+  getWorkspaceSessions,
+  saveWorkspaceSessions,
 } from "../services/tauri";
 import { useAppServerEvents } from "./useAppServerEvents";
 
 const emptyItems: Record<string, ConversationItem[]> = {};
+const DEFAULT_SESSION_STORE_VERSION = 1;
+
+function createSessionStore(): WorkspaceSessionStore {
+  return { version: DEFAULT_SESSION_STORE_VERSION, sessions: {} };
+}
+
+function normalizeNameSource(value: SessionNameSource | string | undefined): SessionNameSource {
+  return value === "custom" ? "custom" : "default";
+}
+
+function normalizeSessionStore(
+  store: WorkspaceSessionStore | null | undefined,
+): WorkspaceSessionStore {
+  if (!store) {
+    return createSessionStore();
+  }
+  const sessions: Record<string, SessionMetadata> = {};
+  const rawSessions = store.sessions ?? {};
+  Object.entries(rawSessions).forEach(([id, entry]) => {
+    if (!entry) {
+      return;
+    }
+    const name = typeof entry.name === "string" ? entry.name : "";
+    sessions[id] = {
+      name,
+      archived: Boolean(entry.archived),
+      nameSource: normalizeNameSource(entry.nameSource),
+    };
+  });
+  return {
+    version:
+      typeof store.version === "number"
+        ? store.version
+        : DEFAULT_SESSION_STORE_VERSION,
+    sessions,
+  };
+}
 
 type ThreadState = {
   activeThreadIdByWorkspace: Record<string, string | null>;
@@ -34,7 +76,12 @@ type ThreadState = {
 type ThreadAction =
   | { type: "setActiveThreadId"; workspaceId: string; threadId: string | null }
   | { type: "ensureThread"; workspaceId: string; threadId: string }
-  | { type: "removeThread"; workspaceId: string; threadId: string }
+  | {
+      type: "setThreadArchived";
+      workspaceId: string;
+      threadId: string;
+      archived: boolean;
+    }
   | { type: "markProcessing"; threadId: string; isProcessing: boolean }
   | { type: "markReviewing"; threadId: string; isReviewing: boolean }
   | { type: "markUnread"; threadId: string; hasUnread: boolean }
@@ -109,6 +156,7 @@ function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
       const thread: ThreadSummary = {
         id: action.threadId,
         name: `Agent ${list.length + 1}`,
+        archived: false,
       };
       return {
         ...state,
@@ -131,26 +179,18 @@ function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
         },
       };
     }
-    case "removeThread": {
+    case "setThreadArchived": {
       const list = state.threadsByWorkspace[action.workspaceId] ?? [];
-      const filtered = list.filter((thread) => thread.id !== action.threadId);
-      const nextActive =
-        state.activeThreadIdByWorkspace[action.workspaceId] === action.threadId
-          ? filtered[0]?.id ?? null
-          : state.activeThreadIdByWorkspace[action.workspaceId] ?? null;
-      const { [action.threadId]: _, ...restItems } = state.itemsByThread;
-      const { [action.threadId]: __, ...restStatus } = state.threadStatusById;
+      const next = list.map((thread) =>
+        thread.id === action.threadId
+          ? { ...thread, archived: action.archived }
+          : thread,
+      );
       return {
         ...state,
         threadsByWorkspace: {
           ...state.threadsByWorkspace,
-          [action.workspaceId]: filtered,
-        },
-        itemsByThread: restItems,
-        threadStatusById: restStatus,
-        activeThreadIdByWorkspace: {
-          ...state.activeThreadIdByWorkspace,
-          [action.workspaceId]: nextActive,
+          [action.workspaceId]: next,
         },
       };
     }
@@ -388,6 +428,11 @@ type UseThreadsOptions = {
   effort?: string | null;
   accessMode?: "read-only" | "current" | "full-access";
   onMessageActivity?: () => void;
+  notifications?: {
+    enabled: boolean;
+    workspaces: WorkspaceInfo[];
+    onOpenThread: (workspaceId: string, threadId: string) => void;
+  };
 };
 
 function asString(value: unknown) {
@@ -687,6 +732,14 @@ function previewThreadName(text: string, fallback: string) {
   return trimmed.length > 38 ? `${trimmed.slice(0, 38)}…` : trimmed;
 }
 
+function formatNotificationBody(text: string, limit = 160) {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return "Agent finished a reply.";
+  }
+  return compact.length > limit ? `${compact.slice(0, limit)}…` : compact;
+}
+
 export function useThreads({
   activeWorkspace,
   onWorkspaceConnected,
@@ -695,9 +748,17 @@ export function useThreads({
   effort,
   accessMode,
   onMessageActivity,
+  notifications,
 }: UseThreadsOptions) {
   const [state, dispatch] = useReducer(threadReducer, initialState);
   const loadedThreads = useRef<Record<string, boolean>>({});
+  const threadsByWorkspaceRef = useRef<Record<string, ThreadSummary[]>>({});
+  const sessionStoreByWorkspaceRef =
+    useRef<Record<string, WorkspaceSessionStore>>({});
+
+  useEffect(() => {
+    threadsByWorkspaceRef.current = state.threadsByWorkspace;
+  }, [state.threadsByWorkspace]);
 
   const activeWorkspaceId = activeWorkspace?.id ?? null;
   const activeThreadId = useMemo(() => {
@@ -710,6 +771,217 @@ export function useThreads({
   const activeItems = useMemo(
     () => (activeThreadId ? state.itemsByThread[activeThreadId] ?? [] : []),
     [activeThreadId, state.itemsByThread],
+  );
+
+  const notificationPermissionRef = useRef<"unknown" | "granted" | "denied">(
+    "unknown",
+  );
+
+  const ensureNotificationPermission = useCallback(async () => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      return false;
+    }
+    const cached = notificationPermissionRef.current;
+    if (cached === "granted") {
+      return true;
+    }
+    if (cached === "denied") {
+      return false;
+    }
+    try {
+      const currentPermission = window.Notification.permission;
+      if (currentPermission === "granted") {
+        notificationPermissionRef.current = "granted";
+        return true;
+      }
+      if (currentPermission === "denied") {
+        notificationPermissionRef.current = "denied";
+        return false;
+      }
+      const permission = await window.Notification.requestPermission();
+      const allowed = permission === "granted";
+      notificationPermissionRef.current = allowed ? "granted" : "denied";
+      return allowed;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const notifyAgentCompletion = useCallback(
+    async (workspaceId: string, threadId: string, text: string) => {
+      const notificationConfig = notifications;
+      if (!notificationConfig?.enabled) {
+        return;
+      }
+      if (typeof document !== "undefined") {
+        const isActiveThread =
+          workspaceId === activeWorkspaceId && threadId === activeThreadId;
+        const isForeground =
+          document.visibilityState === "visible" && document.hasFocus();
+        if (isActiveThread && isForeground) {
+          return;
+        }
+      }
+      const allowed = await ensureNotificationPermission();
+      if (!allowed) {
+        return;
+      }
+      const workspaceName =
+        notificationConfig.workspaces.find(
+          (workspace) => workspace.id === workspaceId,
+        )?.name ?? "Workspace";
+      const threadName =
+        threadsByWorkspaceRef.current[workspaceId]?.find(
+          (thread) => thread.id === threadId,
+        )?.name ?? "Agent";
+      const title = `${workspaceName} · ${threadName}`;
+      const body = formatNotificationBody(text);
+      try {
+        const notification = new window.Notification(title, {
+          body,
+          tag: `${workspaceId}:${threadId}`,
+        });
+        notification.onclick = () => {
+          try {
+            notification.close?.();
+          } catch {
+            // Ignore close errors.
+          }
+          try {
+            const windowHandle = getCurrentWindow();
+            void windowHandle.show();
+            void windowHandle.setFocus();
+          } catch {
+            // Ignore focus errors.
+          }
+          try {
+            notificationConfig.onOpenThread(workspaceId, threadId);
+          } catch {
+            // Ignore open errors.
+          }
+        };
+      } catch {
+        // Ignore notification errors.
+      }
+    },
+    [
+      activeThreadId,
+      activeWorkspaceId,
+      ensureNotificationPermission,
+      notifications,
+    ],
+  );
+
+  const logSessionError = useCallback(
+    (label: string, error: unknown) => {
+      onDebug?.({
+        id: `${Date.now()}-client-session-${label}-error`,
+        timestamp: Date.now(),
+        source: "error",
+        label: `session/${label} error`,
+        payload: error instanceof Error ? error.message : String(error),
+      });
+    },
+    [onDebug],
+  );
+
+  const getSessionStore = useCallback(
+    async (workspaceId: string) => {
+      const cached = sessionStoreByWorkspaceRef.current[workspaceId];
+      if (cached) {
+        return cached;
+      }
+      try {
+        const store = normalizeSessionStore(
+          await getWorkspaceSessions(workspaceId),
+        );
+        sessionStoreByWorkspaceRef.current[workspaceId] = store;
+        return store;
+      } catch (error) {
+        logSessionError("read", error);
+        const fallback = createSessionStore();
+        sessionStoreByWorkspaceRef.current[workspaceId] = fallback;
+        return fallback;
+      }
+    },
+    [logSessionError],
+  );
+
+  const persistSessionStore = useCallback(
+    async (workspaceId: string, store: WorkspaceSessionStore) => {
+      try {
+        await saveWorkspaceSessions(workspaceId, store);
+      } catch (error) {
+        logSessionError("write", error);
+      }
+    },
+    [logSessionError],
+  );
+
+  const getFallbackThreadName = useCallback((workspaceId: string, threadId: string) => {
+    const list = threadsByWorkspaceRef.current[workspaceId] ?? [];
+    const existing = list.find((thread) => thread.id === threadId);
+    if (existing?.name) {
+      return existing.name;
+    }
+    return `Agent ${threadId.slice(0, 4)}`;
+  }, []);
+
+  const ensureSessionEntry = useCallback(
+    async (workspaceId: string, threadId: string, fallbackName: string) => {
+      const store = await getSessionStore(workspaceId);
+      const existing = store.sessions[threadId];
+      const nameSource = existing ? normalizeNameSource(existing.nameSource) : "default";
+      const archived = existing?.archived ?? false;
+      const name = existing?.name?.trim() ? existing.name : fallbackName;
+      const shouldUpdate =
+        !existing ||
+        existing.name !== name ||
+        existing.archived !== archived ||
+        existing.nameSource !== nameSource;
+      if (shouldUpdate) {
+        store.sessions[threadId] = { name, archived, nameSource };
+        sessionStoreByWorkspaceRef.current[workspaceId] = store;
+        await persistSessionStore(workspaceId, store);
+      }
+    },
+    [getSessionStore, persistSessionStore],
+  );
+
+  const setDefaultThreadName = useCallback(
+    async (workspaceId: string, threadId: string, nextName: string) => {
+      const trimmed = nextName.trim();
+      if (!trimmed) {
+        return;
+      }
+      const store = await getSessionStore(workspaceId);
+      const existing = store.sessions[threadId];
+      if (existing?.nameSource === "custom") {
+        return;
+      }
+      const archived = existing?.archived ?? false;
+      const entry: SessionMetadata = {
+        name: trimmed,
+        archived,
+        nameSource: "default",
+      };
+      const shouldUpdate =
+        !existing ||
+        existing.name !== entry.name ||
+        existing.archived !== entry.archived ||
+        existing.nameSource !== entry.nameSource;
+      if (shouldUpdate) {
+        store.sessions[threadId] = entry;
+        sessionStoreByWorkspaceRef.current[workspaceId] = store;
+        await persistSessionStore(workspaceId, store);
+      }
+      const list = threadsByWorkspaceRef.current[workspaceId] ?? [];
+      const current = list.find((thread) => thread.id === threadId);
+      if (!current || current.name !== trimmed) {
+        dispatch({ type: "setThreadName", workspaceId, threadId, name: trimmed });
+      }
+    },
+    [getSessionStore, persistSessionStore],
   );
 
   const handleWorkspaceConnected = useCallback(
@@ -772,6 +1044,11 @@ export function useThreads({
         }
         if (threadId !== activeThreadId) {
           dispatch({ type: "markUnread", threadId, hasUnread: true });
+        }
+        try {
+          void notifyAgentCompletion(workspaceId, threadId, text);
+        } catch {
+          // Ignore notification errors.
         }
       },
       onItemStarted: (workspaceId: string, threadId: string, item) => {
@@ -871,6 +1148,7 @@ export function useThreads({
       activeThreadId,
       activeWorkspaceId,
       handleWorkspaceConnected,
+      notifyAgentCompletion,
       onDebug,
       onMessageActivity,
     ],
@@ -898,13 +1176,16 @@ export function useThreads({
         });
         const thread = response.result?.thread ?? response.thread;
         const threadId = String(thread?.id ?? "");
-      if (threadId) {
-        dispatch({ type: "ensureThread", workspaceId, threadId });
-        dispatch({ type: "setActiveThreadId", workspaceId, threadId });
-        loadedThreads.current[threadId] = true;
-        return threadId;
-      }
-      return null;
+        if (threadId) {
+          dispatch({ type: "ensureThread", workspaceId, threadId });
+          dispatch({ type: "setActiveThreadId", workspaceId, threadId });
+          loadedThreads.current[threadId] = true;
+          const list = threadsByWorkspaceRef.current[workspaceId] ?? [];
+          const fallbackName = `Agent ${list.length + 1}`;
+          void ensureSessionEntry(workspaceId, threadId, fallbackName);
+          return threadId;
+        }
+        return null;
       } catch (error) {
         onDebug?.({
           id: `${Date.now()}-client-thread-start-error`,
@@ -916,7 +1197,7 @@ export function useThreads({
         throw error;
       }
     },
-    [onDebug],
+    [ensureSessionEntry, onDebug],
   );
 
   const startThread = useCallback(async () => {
@@ -961,14 +1242,11 @@ export function useThreads({
             threadId,
             isReviewing: isReviewingFromThread(thread),
           });
-          const preview = asString(thread?.preview ?? "");
+          const preview = asString(thread?.preview ?? "").trim();
           if (preview) {
-            dispatch({
-              type: "setThreadName",
-              workspaceId,
-              threadId,
-              name: previewThreadName(preview, `Agent ${threadId.slice(0, 4)}`),
-            });
+            const fallbackName = getFallbackThreadName(workspaceId, threadId);
+            const nextName = previewThreadName(preview, fallbackName);
+            void setDefaultThreadName(workspaceId, threadId, nextName);
           }
         }
         loadedThreads.current[threadId] = true;
@@ -984,7 +1262,7 @@ export function useThreads({
         return null;
       }
     },
-    [onDebug],
+    [getFallbackThreadName, onDebug, setDefaultThreadName],
   );
 
   const listThreadsForWorkspace = useCallback(
@@ -1023,19 +1301,52 @@ export function useThreads({
           const bCreated = Number(b?.createdAt ?? b?.created_at ?? 0);
           return bCreated - aCreated;
         });
+        const store = await getSessionStore(workspace.id);
+        let hasSessionUpdates = false;
         const summaries = matching
           .map((thread, index) => {
+            const threadId = String(thread?.id ?? "");
+            if (!threadId) {
+              return null;
+            }
             const preview = asString(thread?.preview ?? "").trim();
             const fallbackName = `Agent ${index + 1}`;
-            const name =
-              preview.length > 0
-                ? preview.length > 38
-                  ? `${preview.slice(0, 38)}…`
-                  : preview
-                : fallbackName;
-            return { id: String(thread?.id ?? ""), name };
+            const existing = store.sessions[threadId];
+            const nameSource = existing
+              ? normalizeNameSource(existing.nameSource)
+              : "default";
+            const archived = existing?.archived ?? false;
+            const hasPreview = preview.length > 0;
+
+            let name = existing?.name ?? "";
+            if (nameSource === "custom") {
+              if (!name) {
+                name = fallbackName;
+              }
+            } else {
+              if (!name) {
+                name = fallbackName;
+              }
+              if (hasPreview) {
+                const nextName = previewThreadName(preview, name || fallbackName);
+                if (nextName !== name) {
+                  name = nextName;
+                }
+              }
+            }
+
+            if (
+              !existing ||
+              existing.name !== name ||
+              existing.archived !== archived ||
+              existing.nameSource !== nameSource
+            ) {
+              store.sessions[threadId] = { name, archived, nameSource };
+              hasSessionUpdates = true;
+            }
+            return { id: threadId, name, archived };
           })
-          .filter((entry) => entry.id);
+          .filter((entry): entry is ThreadSummary => Boolean(entry));
 
         const unique = new Map<string, ThreadSummary>();
         summaries.forEach((thread) => {
@@ -1043,6 +1354,10 @@ export function useThreads({
             unique.set(thread.id, thread);
           }
         });
+        sessionStoreByWorkspaceRef.current[workspace.id] = store;
+        if (hasSessionUpdates) {
+          await persistSessionStore(workspace.id, store);
+        }
         dispatch({
           type: "setThreads",
           workspaceId: workspace.id,
@@ -1058,7 +1373,7 @@ export function useThreads({
         });
       }
     },
-    [onDebug],
+    [getSessionStore, onDebug, persistSessionStore],
   );
 
   const sendUserMessage = useCallback(
@@ -1089,12 +1404,11 @@ export function useThreads({
         text: trimmedText,
         attachments: attachments.length > 0 ? attachments : undefined,
       });
-      dispatch({
-        type: "setThreadName",
-        workspaceId: activeWorkspace.id,
-        threadId,
-        name: previewThreadName(trimmedText, `Agent ${threadId.slice(0, 4)}`),
-      });
+      if (trimmedText) {
+        const fallbackName = getFallbackThreadName(activeWorkspace.id, threadId);
+        const nextName = previewThreadName(trimmedText, fallbackName);
+        void setDefaultThreadName(activeWorkspace.id, threadId, nextName);
+      }
       dispatch({ type: "markProcessing", threadId, isProcessing: true });
       try {
         void onMessageActivity?.();
@@ -1146,9 +1460,11 @@ export function useThreads({
       activeThreadId,
       effort,
       accessMode,
+      getFallbackThreadName,
       model,
       onDebug,
       onMessageActivity,
+      setDefaultThreadName,
       startThread,
     ],
   );
@@ -1260,22 +1576,44 @@ export function useThreads({
     [activeWorkspaceId, resumeThreadForWorkspace],
   );
 
-  const removeThread = useCallback((workspaceId: string, threadId: string) => {
-    dispatch({ type: "removeThread", workspaceId, threadId });
-    (async () => {
-      try {
-        await archiveThreadService(workspaceId, threadId);
-      } catch (error) {
-        onDebug?.({
-          id: `${Date.now()}-client-thread-archive-error`,
-          timestamp: Date.now(),
-          source: "error",
-          label: "thread/archive error",
-          payload: error instanceof Error ? error.message : String(error),
-        });
+  const renameThread = useCallback(
+    async (workspaceId: string, threadId: string, name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) {
+        return;
       }
-    })();
-  }, [onDebug]);
+      dispatch({ type: "setThreadName", workspaceId, threadId, name: trimmed });
+      const store = await getSessionStore(workspaceId);
+      const existing = store.sessions[threadId];
+      const archived = existing?.archived ?? false;
+      store.sessions[threadId] = {
+        name: trimmed,
+        archived,
+        nameSource: "custom",
+      };
+      sessionStoreByWorkspaceRef.current[workspaceId] = store;
+      await persistSessionStore(workspaceId, store);
+    },
+    [getSessionStore, persistSessionStore],
+  );
+
+  const setThreadArchived = useCallback(
+    async (workspaceId: string, threadId: string, archived: boolean) => {
+      dispatch({ type: "setThreadArchived", workspaceId, threadId, archived });
+      const store = await getSessionStore(workspaceId);
+      const existing = store.sessions[threadId];
+      const nameSource = existing
+        ? normalizeNameSource(existing.nameSource)
+        : "default";
+      const name = existing?.name?.trim()
+        ? existing.name
+        : getFallbackThreadName(workspaceId, threadId);
+      store.sessions[threadId] = { name, archived, nameSource };
+      sessionStoreByWorkspaceRef.current[workspaceId] = store;
+      await persistSessionStore(workspaceId, store);
+    },
+    [getFallbackThreadName, getSessionStore, persistSessionStore],
+  );
 
   return {
     activeThreadId,
@@ -1284,7 +1622,8 @@ export function useThreads({
     approvals: state.approvals,
     threadsByWorkspace: state.threadsByWorkspace,
     threadStatusById: state.threadStatusById,
-    removeThread,
+    renameThread,
+    setThreadArchived,
     startThread,
     startThreadForWorkspace,
     listThreadsForWorkspace,

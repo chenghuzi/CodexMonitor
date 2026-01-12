@@ -39,9 +39,23 @@ export type ConversationItem =
       changes?: { path: string; kind?: string; diff?: string }[];
     };
 
+export type SessionNameSource = "default" | "custom";
+
+export type SessionMetadata = {
+  name: string;
+  archived: boolean;
+  nameSource: SessionNameSource;
+};
+
+export type WorkspaceSessionStore = {
+  version: number;
+  sessions: Record<string, SessionMetadata>;
+};
+
 export type ThreadSummary = {
   id: string;
   name: string;
+  archived: boolean;
 };
 
 export type ReviewTarget =
@@ -73,6 +87,7 @@ export type AppSettings = {
   bypassApprovalsAndSandbox: boolean;
   enableWebSearchRequest: boolean;
   confirmBeforeQuit: boolean;
+  enableCompletionNotifications: boolean;
   sidebarWidth: number;
 };
 

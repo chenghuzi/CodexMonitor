@@ -192,6 +192,52 @@ struct WorkspaceEntry {
     codex_bin: Option<String>,
 }
 
+fn default_session_store_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")]
+enum SessionNameSource {
+    Default,
+    Custom,
+}
+
+impl Default for SessionNameSource {
+    fn default() -> Self {
+        SessionNameSource::Default
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SessionMetadata {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    archived: bool,
+    #[serde(default)]
+    name_source: SessionNameSource,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceSessionStore {
+    #[serde(default = "default_session_store_version")]
+    version: u32,
+    #[serde(default)]
+    sessions: HashMap<String, SessionMetadata>,
+}
+
+impl Default for WorkspaceSessionStore {
+    fn default() -> Self {
+        Self {
+            version: default_session_store_version(),
+            sessions: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 enum ThemePreference {
@@ -221,6 +267,8 @@ struct AppSettings {
     enable_web_search_request: bool,
     #[serde(default)]
     confirm_before_quit: bool,
+    #[serde(default)]
+    enable_completion_notifications: bool,
     #[serde(default = "default_sidebar_width")]
     sidebar_width: i64,
 }
@@ -233,6 +281,7 @@ impl Default for AppSettings {
             bypass_approvals_and_sandbox: false,
             enable_web_search_request: false,
             confirm_before_quit: false,
+            enable_completion_notifications: false,
             sidebar_width: default_sidebar_width(),
         }
     }
@@ -357,6 +406,31 @@ fn write_settings(path: &PathBuf, settings: &AppSettings) -> Result<(), String> 
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    std::fs::write(path, data).map_err(|e| e.to_string())
+}
+
+fn workspace_sessions_path(workspace_path: &str) -> PathBuf {
+    PathBuf::from(workspace_path)
+        .join(".codexmonitor")
+        .join("sessions.json")
+}
+
+fn read_workspace_sessions(path: &PathBuf) -> Result<WorkspaceSessionStore, String> {
+    if !path.exists() {
+        return Ok(WorkspaceSessionStore::default());
+    }
+    let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&data).map_err(|e| e.to_string())
+}
+
+fn write_workspace_sessions(
+    path: &PathBuf,
+    sessions: &WorkspaceSessionStore,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let data = serde_json::to_string_pretty(sessions).map_err(|e| e.to_string())?;
     std::fs::write(path, data).map_err(|e| e.to_string())
 }
 
@@ -630,6 +704,38 @@ async fn archive_thread(
         "threadId": thread_id
     });
     session.send_request("thread/archive", params).await
+}
+
+#[tauri::command]
+async fn get_workspace_sessions(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceSessionStore, String> {
+    let workspaces = state.workspaces.lock().await;
+    let entry = workspaces
+        .get(&workspace_id)
+        .ok_or("workspace not found")?;
+    let path = workspace_sessions_path(&entry.path);
+    read_workspace_sessions(&path)
+}
+
+#[tauri::command]
+async fn save_workspace_sessions(
+    workspace_id: String,
+    sessions: WorkspaceSessionStore,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceSessionStore, String> {
+    let workspaces = state.workspaces.lock().await;
+    let entry = workspaces
+        .get(&workspace_id)
+        .ok_or("workspace not found")?;
+    let path = workspace_sessions_path(&entry.path);
+    let mut store = sessions;
+    if store.version == 0 {
+        store.version = default_session_store_version();
+    }
+    write_workspace_sessions(&path, &store)?;
+    Ok(store)
 }
 
 #[tauri::command]
@@ -1220,6 +1326,8 @@ pub fn run() {
             resume_thread,
             list_threads,
             archive_thread,
+            get_workspace_sessions,
+            save_workspace_sessions,
             connect_workspace,
             get_git_status,
             get_git_diffs,

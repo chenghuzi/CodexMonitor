@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import "./styles/base.css";
 import "./styles/buttons.css";
@@ -43,12 +50,36 @@ import type { AccessMode, ComposerAttachment } from "./types";
 type MainAppProps = {
   accessMode: AccessMode;
   onAccessModeChange: (mode: AccessMode) => void;
+  sidebarWidth: number;
+  onSidebarWidthChange: (width: number) => void;
 };
 
-function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 420;
+
+function clampSidebarWidth(value: number) {
+  return Math.min(
+    SIDEBAR_MAX_WIDTH,
+    Math.max(SIDEBAR_MIN_WIDTH, Math.round(value)),
+  );
+}
+
+function MainApp({
+  accessMode,
+  onAccessModeChange,
+  sidebarWidth: persistedSidebarWidth,
+  onSidebarWidthChange,
+}: MainAppProps) {
   const [centerMode, setCenterMode] = useState<"chat" | "diff">("chat");
   const [selectedDiffPath, setSelectedDiffPath] = useState<string | null>(null);
   const [isConfirmQuitOpen, setIsConfirmQuitOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    clampSidebarWidth(persistedSidebarWidth),
+  );
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(
+    null,
+  );
   const {
     debugOpen,
     setDebugOpen,
@@ -125,6 +156,15 @@ function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
   const attachmentsRef = useRef<ComposerAttachment[]>([]);
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const activeThreadIdRef = useRef<string | null>(null);
+  const appStyle = useMemo(
+    () =>
+      ({
+        "--sidebar-width": `${sidebarWidth}px`,
+        userSelect: isResizingSidebar ? "none" : undefined,
+        cursor: isResizingSidebar ? "col-resize" : undefined,
+      }) as CSSProperties,
+    [sidebarWidth, isResizingSidebar],
+  );
 
   useEffect(() => {
     attachmentsRef.current = attachments;
@@ -134,6 +174,12 @@ function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
     activeWorkspaceIdRef.current = activeWorkspaceId ?? null;
     activeThreadIdRef.current = activeThreadId ?? null;
   }, [activeWorkspaceId, activeThreadId]);
+
+  useEffect(() => {
+    if (!isResizingSidebar) {
+      setSidebarWidth(clampSidebarWidth(persistedSidebarWidth));
+    }
+  }, [isResizingSidebar, persistedSidebarWidth]);
 
   const clearAttachments = useCallback(() => {
     setAttachments((prev) => {
@@ -347,8 +393,60 @@ function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
     }
   }, [addDebugEntry]);
 
+  const commitSidebarWidth = useCallback(
+    (value: number) => {
+      const nextWidth = clampSidebarWidth(value);
+      if (nextWidth !== persistedSidebarWidth) {
+        onSidebarWidthChange(nextWidth);
+      }
+    },
+    [onSidebarWidthChange, persistedSidebarWidth],
+  );
+
+  const handleSidebarResizeStart = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      sidebarDragRef.current = {
+        startX: event.clientX,
+        startWidth: sidebarWidth,
+      };
+      setIsResizingSidebar(true);
+    },
+    [sidebarWidth],
+  );
+
+  const handleSidebarResizeMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!isResizingSidebar || !sidebarDragRef.current) {
+        return;
+      }
+      const delta = event.clientX - sidebarDragRef.current.startX;
+      const nextWidth = clampSidebarWidth(
+        sidebarDragRef.current.startWidth + delta,
+      );
+      setSidebarWidth(nextWidth);
+    },
+    [isResizingSidebar],
+  );
+
+  const handleSidebarResizeEnd = useCallback(() => {
+    if (!isResizingSidebar) {
+      return;
+    }
+    setIsResizingSidebar(false);
+    sidebarDragRef.current = null;
+    commitSidebarWidth(sidebarWidth);
+  }, [commitSidebarWidth, isResizingSidebar, sidebarWidth]);
+
   return (
-    <div className="app">
+    <div
+      className={`app${isResizingSidebar ? " is-resizing" : ""}`}
+      style={appStyle}
+    >
       <Sidebar
         workspaces={workspaces}
         threadsByWorkspace={threadsByWorkspace}
@@ -370,6 +468,19 @@ function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
         onDeleteThread={(workspaceId, threadId) => {
           removeThread(workspaceId, threadId);
         }}
+      />
+      <div
+        className="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-valuemin={SIDEBAR_MIN_WIDTH}
+        aria-valuemax={SIDEBAR_MAX_WIDTH}
+        aria-valuenow={sidebarWidth}
+        onPointerDown={handleSidebarResizeStart}
+        onPointerMove={handleSidebarResizeMove}
+        onPointerUp={handleSidebarResizeEnd}
+        onPointerCancel={handleSidebarResizeEnd}
+        data-tauri-drag-region="false"
       />
 
       <section className="main">
@@ -543,6 +654,8 @@ function App() {
     <MainApp
       accessMode={settings.accessMode}
       onAccessModeChange={(mode) => updateSettings({ accessMode: mode })}
+      sidebarWidth={settings.sidebarWidth}
+      onSidebarWidthChange={(width) => updateSettings({ sidebarWidth: width })}
     />
   );
 }

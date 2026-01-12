@@ -78,7 +78,8 @@ body {
 .app {
   height: 100vh;
   display: grid;
-  grid-template-columns: 280px 1fr;
+  --sidebar-width: 280px;
+  grid-template-columns: var(--sidebar-width) 1fr;
   background: var(--bg-app);
   border-radius: 0;
   overflow: hidden;

@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   bypassApprovalsAndSandbox: false,
   enableWebSearchRequest: false,
   confirmBeforeQuit: false,
+  sidebarWidth: 280,
 };
 
 function resolveTheme(preference: ThemePreference, prefersDark: boolean) {

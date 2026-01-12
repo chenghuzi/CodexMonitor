@@ -73,6 +73,7 @@ export type AppSettings = {
   bypassApprovalsAndSandbox: boolean;
   enableWebSearchRequest: boolean;
   confirmBeforeQuit: boolean;
+  sidebarWidth: number;
 };
 
 export type ApprovalRequest = {

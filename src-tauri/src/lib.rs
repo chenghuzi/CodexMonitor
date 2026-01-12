@@ -208,6 +208,10 @@ enum AccessMode {
     FullAccess,
 }
 
+fn default_sidebar_width() -> i64 {
+    280
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
@@ -217,6 +221,8 @@ struct AppSettings {
     enable_web_search_request: bool,
     #[serde(default)]
     confirm_before_quit: bool,
+    #[serde(default = "default_sidebar_width")]
+    sidebar_width: i64,
 }
 
 impl Default for AppSettings {
@@ -227,6 +233,7 @@ impl Default for AppSettings {
             bypass_approvals_and_sandbox: false,
             enable_web_search_request: false,
             confirm_before_quit: false,
+            sidebar_width: default_sidebar_width(),
         }
     }
 }

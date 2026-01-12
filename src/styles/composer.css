@@ -17,6 +17,60 @@
   align-items: center;
 }
 
+.composer-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-left: 4px;
+}
+
+.composer-attachment {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-surface-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.composer-attachment img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.composer-attachment-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+
+.composer-attachment-remove:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .composer textarea {
   height: 60px;
   resize: none;

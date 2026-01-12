@@ -1,8 +1,14 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import type { ClipboardEvent, DragEvent } from "react";
+import type { ComposerAttachment } from "../types";
 
 type ComposerProps = {
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: ComposerAttachment[]) => void;
   disabled?: boolean;
+  isSavingAttachments?: boolean;
+  attachments: ComposerAttachment[];
+  onAddAttachments: (files: File[]) => void;
+  onRemoveAttachment: (id: string) => void;
   models: { id: string; displayName: string; model: string }[];
   selectedModelId: string | null;
   onSelectModel: (id: string) => void;
@@ -17,6 +23,10 @@ type ComposerProps = {
 export function Composer({
   onSend,
   disabled = false,
+  isSavingAttachments = false,
+  attachments,
+  onAddAttachments,
+  onRemoveAttachment,
   models,
   selectedModelId,
   onSelectModel,
@@ -28,18 +38,71 @@ export function Composer({
   skills,
 }: ComposerProps) {
   const [text, setText] = useState("");
+  const canSend = useMemo(
+    () => !disabled && !isSavingAttachments && (!!text.trim() || attachments.length > 0),
+    [attachments.length, disabled, isSavingAttachments, text],
+  );
 
   const handleSend = useCallback(() => {
-    if (disabled) {
+    if (!canSend) {
       return;
     }
-    const trimmed = text.trim();
-    if (!trimmed) {
-      return;
-    }
-    onSend(trimmed);
+    onSend(text, attachments);
     setText("");
-  }, [disabled, onSend, text]);
+  }, [attachments, canSend, onSend, text]);
+
+  const handlePaste = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      if (disabled) {
+        return;
+      }
+      const items = Array.from(event.clipboardData?.items ?? []);
+      const files = items
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+      if (files.length > 0) {
+        const hasText = Boolean(event.clipboardData?.getData("text/plain"));
+        onAddAttachments(files);
+        if (!hasText) {
+          event.preventDefault();
+        }
+      }
+    },
+    [disabled, onAddAttachments],
+  );
+
+  const handleDragOver = useCallback(
+    (event: DragEvent<HTMLTextAreaElement>) => {
+      if (disabled) {
+        return;
+      }
+      const hasFiles = Array.from(event.dataTransfer?.items ?? []).some(
+        (item) => item.kind === "file",
+      );
+      if (hasFiles) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }
+    },
+    [disabled],
+  );
+
+  const handleDrop = useCallback(
+    (event: DragEvent<HTMLTextAreaElement>) => {
+      if (disabled) {
+        return;
+      }
+      const files = Array.from(event.dataTransfer?.files ?? []).filter((file) =>
+        file.type.startsWith("image/"),
+      );
+      if (files.length > 0) {
+        event.preventDefault();
+        onAddAttachments(files);
+      }
+    },
+    [disabled, onAddAttachments],
+  );
 
   const handleSelectSkill = useCallback((name: string) => {
     const snippet = `$${name}`;
@@ -58,31 +121,54 @@ export function Composer({
   return (
     <footer className={`composer${disabled ? " is-disabled" : ""}`}>
       <div className="composer-input">
-        <textarea
-          placeholder={
-            disabled
-              ? "Review in progress. Chat will re-enable when it completes."
-              : "Ask Codex to do something..."
-          }
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          disabled={disabled}
-          onKeyDown={(event) => {
-            if (disabled) {
-              return;
+        <div className="composer-field">
+          <textarea
+            placeholder={
+              disabled
+                ? "Review in progress. Chat will re-enable when it completes."
+                : "Ask Codex to do something... (paste or drop images)"
             }
-            if (event.key === "Enter" && event.metaKey) {
-              event.preventDefault();
-              handleSend();
-            }
-          }}
-        />
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            disabled={disabled}
+            onPaste={handlePaste}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+            onKeyDown={(event) => {
+              if (disabled) {
+                return;
+              }
+              if (event.key === "Enter" && event.metaKey) {
+                event.preventDefault();
+                handleSend();
+              }
+            }}
+          />
+          {attachments.length > 0 && (
+            <div className="composer-attachments">
+              {attachments.map((attachment) => (
+                <div key={attachment.id} className="composer-attachment">
+                  <img src={attachment.previewUrl} alt={attachment.name} />
+                  <button
+                    type="button"
+                    className="composer-attachment-remove"
+                    onClick={() => onRemoveAttachment(attachment.id)}
+                    aria-label={`Remove ${attachment.name}`}
+                    disabled={disabled}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           className="composer-send"
           onClick={handleSend}
-          disabled={disabled}
+          disabled={!canSend}
         >
-          Send (cmd+enter)
+          {isSavingAttachments ? "Saving..." : "Send (cmd+enter)"}
         </button>
       </div>
       <div className="composer-bar">

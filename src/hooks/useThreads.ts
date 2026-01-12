@@ -3,6 +3,7 @@ import type {
   ApprovalRequest,
   ConversationItem,
   DebugEntry,
+  LocalImageInput,
   ThreadSummary,
   WorkspaceInfo,
 } from "../types";
@@ -1030,8 +1031,11 @@ export function useThreads({
   );
 
   const sendUserMessage = useCallback(
-    async (text: string) => {
-      if (!activeWorkspace || !text.trim()) {
+    async (text: string, attachments: LocalImageInput[] = []) => {
+      if (!activeWorkspace) {
+        return;
+      }
+      if (!text.trim() && attachments.length === 0) {
         return;
       }
       let threadId = activeThreadId;
@@ -1044,13 +1048,21 @@ export function useThreads({
         await resumeThreadForWorkspace(activeWorkspace.id, threadId);
       }
 
-      const messageText = text.trim();
+      const trimmedText = text.trim();
+      const attachmentText =
+        attachments.length > 0
+          ? attachments.map(() => "[image]").join(" ")
+          : "";
+      const messageText = [trimmedText, attachmentText].filter(Boolean).join(" ");
+      if (!messageText.trim()) {
+        return;
+      }
       dispatch({ type: "addUserMessage", threadId, text: messageText });
       dispatch({
         type: "setThreadName",
         workspaceId: activeWorkspace.id,
         threadId,
-        name: previewThreadName(messageText, `Agent ${threadId.slice(0, 4)}`),
+        name: previewThreadName(trimmedText, `Agent ${threadId.slice(0, 4)}`),
       });
       dispatch({ type: "markProcessing", threadId, isProcessing: true });
       try {
@@ -1067,6 +1079,7 @@ export function useThreads({
           workspaceId: activeWorkspace.id,
           threadId,
           text: messageText,
+          attachments: attachments.length,
           model,
           effort,
         },
@@ -1075,8 +1088,9 @@ export function useThreads({
         const response = await sendUserMessageService(
           activeWorkspace.id,
           threadId,
-          messageText,
+          text,
           { model, effort, accessMode },
+          attachments.length > 0 ? attachments : undefined,
         );
         onDebug?.({
           id: `${Date.now()}-server-turn-start`,

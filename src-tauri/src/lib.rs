@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use git2::{DiffOptions, Repository, Status, StatusOptions, Tree};
@@ -26,6 +26,11 @@ struct GitFileStatus {
 struct GitFileDiff {
     path: String,
     diff: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct LocalImageInput {
+    path: String,
 }
 
 fn normalize_git_path(path: &str) -> String {
@@ -81,6 +86,42 @@ struct WorkspaceEntry {
     name: String,
     path: String,
     codex_bin: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
+enum ThemePreference {
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
+enum AccessMode {
+    ReadOnly,
+    Current,
+    FullAccess,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AppSettings {
+    theme_preference: ThemePreference,
+    access_mode: AccessMode,
+    bypass_approvals_and_sandbox: bool,
+    enable_web_search_request: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme_preference: ThemePreference::System,
+            access_mode: AccessMode::Current,
+            bypass_approvals_and_sandbox: false,
+            enable_web_search_request: false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -145,20 +186,27 @@ struct AppState {
     workspaces: Mutex<HashMap<String, WorkspaceEntry>>,
     sessions: Mutex<HashMap<String, Arc<WorkspaceSession>>>,
     storage_path: PathBuf,
+    settings: Mutex<AppSettings>,
+    settings_path: PathBuf,
 }
 
 impl AppState {
     fn load(app: &AppHandle) -> Self {
-        let storage_path = app
+        let app_data_dir = app
             .path()
             .app_data_dir()
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| ".".into()))
-            .join("workspaces.json");
+            .to_path_buf();
+        let storage_path = app_data_dir.join("workspaces.json");
+        let settings_path = app_data_dir.join("settings.json");
         let workspaces = read_workspaces(&storage_path).unwrap_or_default();
+        let settings = read_settings(&settings_path).unwrap_or_default();
         Self {
             workspaces: Mutex::new(workspaces),
             sessions: Mutex::new(HashMap::new()),
             storage_path,
+            settings: Mutex::new(settings),
+            settings_path,
         }
     }
 }
@@ -180,11 +228,38 @@ fn write_workspaces(path: &PathBuf, entries: &[WorkspaceEntry]) -> Result<(), St
     std::fs::write(path, data).map_err(|e| e.to_string())
 }
 
+fn read_settings(path: &PathBuf) -> Result<AppSettings, String> {
+    if !path.exists() {
+        return Ok(AppSettings::default());
+    }
+    let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&data).map_err(|e| e.to_string())
+}
+
+fn write_settings(path: &PathBuf, settings: &AppSettings) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    std::fs::write(path, data).map_err(|e| e.to_string())
+}
+
 async fn spawn_workspace_session(
     entry: WorkspaceEntry,
     app_handle: AppHandle,
 ) -> Result<Arc<WorkspaceSession>, String> {
     let mut command = Command::new(entry.codex_bin.clone().unwrap_or_else(|| "codex".into()));
+    let settings = {
+        let state = app_handle.state::<AppState>();
+        let settings = state.settings.lock().await.clone();
+        settings
+    };
+    if settings.bypass_approvals_and_sandbox {
+        command.arg("--dangerously-bypass-approvals-and-sandbox");
+    }
+    if settings.enable_web_search_request {
+        command.arg("--enable").arg("web_search_request");
+    }
     command.arg("app-server");
     command.stdin(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::piped());
@@ -442,6 +517,55 @@ async fn archive_thread(
 }
 
 #[tauri::command]
+async fn save_attachment(
+    workspace_id: String,
+    bytes: Vec<u8>,
+    name: Option<String>,
+    mime: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if bytes.is_empty() {
+        return Err("empty attachment".to_string());
+    }
+    let workspaces = state.workspaces.lock().await;
+    let entry = workspaces
+        .get(&workspace_id)
+        .ok_or("workspace not found")?;
+    let mut dir = PathBuf::from(&entry.path);
+    dir.push(".codex");
+    dir.push("attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let name_ext = name
+        .as_deref()
+        .and_then(|value| Path::new(value).extension())
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_lowercase());
+    let mime_ext = mime.as_deref().and_then(|value| match value {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/jpg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "image/heic" => Some("heic"),
+        "image/heif" => Some("heif"),
+        "image/bmp" => Some("bmp"),
+        "image/tiff" => Some("tiff"),
+        _ => None,
+    });
+    let extension = name_ext
+        .as_deref()
+        .or(mime_ext)
+        .unwrap_or("img");
+
+    let filename = format!("{}.{}", Uuid::new_v4(), extension);
+    let mut path = dir.clone();
+    path.push(filename);
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(json!({ "path": path.to_string_lossy().to_string() }))
+}
+
+#[tauri::command]
 async fn send_user_message(
     workspace_id: String,
     thread_id: String,
@@ -449,6 +573,7 @@ async fn send_user_message(
     model: Option<String>,
     effort: Option<String>,
     access_mode: Option<String>,
+    attachments: Option<Vec<LocalImageInput>>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     let sessions = state.sessions.lock().await;
@@ -476,9 +601,24 @@ async fn send_user_message(
         "on-request"
     };
 
+    let mut input: Vec<Value> = Vec::new();
+    if !text.trim().is_empty() {
+        input.push(json!({ "type": "text", "text": text }));
+    }
+    if let Some(attachments) = attachments {
+        for attachment in attachments {
+            if !attachment.path.trim().is_empty() {
+                input.push(json!({ "type": "localImage", "path": attachment.path }));
+            }
+        }
+    }
+    if input.is_empty() {
+        return Err("empty input".to_string());
+    }
+
     let params = json!({
         "threadId": thread_id,
-        "input": [{ "type": "text", "text": text }],
+        "input": input,
         "cwd": session.entry.path,
         "approvalPolicy": approval_policy,
         "sandboxPolicy": sandbox_policy,
@@ -775,6 +915,26 @@ fn open_settings_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
     Ok(())
 }
 
+#[tauri::command]
+async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    Ok(state.settings.lock().await.clone())
+}
+
+#[tauri::command]
+async fn update_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    {
+        let mut guard = state.settings.lock().await;
+        *guard = settings.clone();
+        write_settings(&state.settings_path, &settings)?;
+    }
+    let _ = app.emit("settings-updated", settings.clone());
+    Ok(settings)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -802,6 +962,7 @@ pub fn run() {
             add_workspace,
             remove_workspace,
             start_thread,
+            save_attachment,
             send_user_message,
             start_review,
             respond_to_server_request,
@@ -812,7 +973,9 @@ pub fn run() {
             get_git_status,
             get_git_diffs,
             model_list,
-            skills_list
+            skills_list,
+            get_settings,
+            update_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

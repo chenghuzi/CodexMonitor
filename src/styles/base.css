@@ -140,7 +140,12 @@ body {
   }
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
 :root[data-theme="dark"] {
+    color-scheme: dark;
     --text-primary: #e6e7ea;
     --text-secondary: rgba(255, 255, 255, 0.75);
     --text-muted: rgba(255, 255, 255, 0.6);

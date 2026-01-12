@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AppSettings, WorkspaceInfo } from "../types";
+import type { AppSettings, LocalImageInput, WorkspaceInfo } from "../types";
 import type { GitFileDiff, GitFileStatus, ReviewTarget } from "../types";
 
 export async function pickWorkspacePath(): Promise<string | null> {
@@ -39,6 +39,7 @@ export async function sendUserMessage(
     effort?: string | null;
     accessMode?: "read-only" | "current" | "full-access";
   },
+  attachments?: LocalImageInput[],
 ) {
   return invoke("send_user_message", {
     workspaceId,
@@ -47,6 +48,19 @@ export async function sendUserMessage(
     model: options?.model ?? null,
     effort: options?.effort ?? null,
     accessMode: options?.accessMode ?? null,
+    attachments: attachments && attachments.length > 0 ? attachments : null,
+  });
+}
+
+export async function saveAttachment(
+  workspaceId: string,
+  payload: { bytes: number[]; name?: string | null; mime?: string | null },
+): Promise<{ path: string }> {
+  return invoke("save_attachment", {
+    workspaceId,
+    bytes: payload.bytes,
+    name: payload.name ?? null,
+    mime: payload.mime ?? null,
   });
 }
 

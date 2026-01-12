@@ -37,6 +37,20 @@ Run in dev mode:
 npm run tauri dev
 ```
 
+## 打包（macOS）
+
+一键构建通用架构 DMG：
+
+```bash
+npm run build:universal-dmg
+```
+
+产物目录：
+
+```
+src-tauri/target/universal-apple-darwin/release/bundle/dmg/
+```
+
 ## Project Structure
 
 ```

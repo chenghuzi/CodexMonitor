@@ -46,6 +46,19 @@ export type ReviewTarget =
 
 export type AccessMode = "read-only" | "current" | "full-access";
 
+export type ComposerAttachment = {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+  path: string;
+  previewUrl: string;
+};
+
+export type LocalImageInput = {
+  path: string;
+};
+
 export type ThemePreference = "system" | "light" | "dark";
 
 export type AppSettings = {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./styles/base.css";
 import "./styles/buttons.css";
 import "./styles/sidebar.css";
@@ -31,7 +31,8 @@ import { useWorkspaceRefreshOnFocus } from "./hooks/useWorkspaceRefreshOnFocus";
 import { useWorkspaceRestore } from "./hooks/useWorkspaceRestore";
 import { Settings } from "./components/Settings";
 import { useSettings } from "./hooks/useSettings";
-import type { AccessMode } from "./types";
+import { saveAttachment } from "./services/tauri";
+import type { AccessMode, ComposerAttachment } from "./types";
 
 type MainAppProps = {
   accessMode: AccessMode;
@@ -110,6 +111,114 @@ function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
     onMessageActivity: refreshGitStatus,
   });
 
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [pendingAttachmentCount, setPendingAttachmentCount] = useState(0);
+  const attachmentsRef = useRef<ComposerAttachment[]>([]);
+  const activeWorkspaceIdRef = useRef<string | null>(null);
+  const activeThreadIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+
+  useEffect(() => {
+    activeWorkspaceIdRef.current = activeWorkspaceId ?? null;
+    activeThreadIdRef.current = activeThreadId ?? null;
+  }, [activeWorkspaceId, activeThreadId]);
+
+  const clearAttachments = useCallback(() => {
+    setAttachments((prev) => {
+      prev.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+      return [];
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      attachmentsRef.current.forEach((attachment) => {
+        URL.revokeObjectURL(attachment.previewUrl);
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    clearAttachments();
+  }, [activeWorkspaceId, activeThreadId, clearAttachments]);
+
+  const handleAddAttachments = useCallback(
+    async (files: File[]) => {
+      if (!activeWorkspace || files.length === 0) {
+        return;
+      }
+      const images = files.filter((file) => file.type.startsWith("image/"));
+      if (images.length === 0) {
+        return;
+      }
+      const workspaceId = activeWorkspace.id;
+      const threadId = activeThreadId ?? null;
+      setPendingAttachmentCount((prev) => prev + images.length);
+      const created: ComposerAttachment[] = [];
+
+      for (const file of images) {
+        try {
+          const buffer = await file.arrayBuffer();
+          const bytes = Array.from(new Uint8Array(buffer));
+          const result = await saveAttachment(workspaceId, {
+            bytes,
+            name: file.name,
+            mime: file.type,
+          });
+          const previewUrl = URL.createObjectURL(file);
+          const id =
+            typeof crypto !== "undefined" && "randomUUID" in crypto
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          if (
+            activeWorkspaceIdRef.current !== workspaceId ||
+            activeThreadIdRef.current !== threadId
+          ) {
+            URL.revokeObjectURL(previewUrl);
+            continue;
+          }
+          created.push({
+            id,
+            name: file.name || "image",
+            size: file.size,
+            mime: file.type || "image",
+            path: result.path,
+            previewUrl,
+          });
+        } catch (error) {
+          addDebugEntry({
+            id: `${Date.now()}-attachment-save-error`,
+            timestamp: Date.now(),
+            source: "error",
+            label: "attachment save error",
+            payload: error instanceof Error ? error.message : String(error),
+          });
+        } finally {
+          setPendingAttachmentCount((prev) => Math.max(0, prev - 1));
+        }
+      }
+
+      if (created.length > 0) {
+        setAttachments((prev) => [...prev, ...created]);
+      }
+    },
+    [activeWorkspace, activeThreadId, addDebugEntry],
+  );
+
+  const handleRemoveAttachment = useCallback((id: string) => {
+    setAttachments((prev) => {
+      const next = prev.filter((attachment) => attachment.id !== id);
+      const removed = prev.find((attachment) => attachment.id === id);
+      if (removed) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return next;
+    });
+  }, []);
+
   useWorkspaceRestore({
     workspaces,
     hasLoaded,
@@ -148,9 +257,13 @@ function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
     setCenterMode("diff");
   }
 
-  async function handleSend(text: string) {
+  async function handleSend(text: string, nextAttachments: ComposerAttachment[]) {
     const trimmed = text.trim();
-    if (!trimmed) {
+    const hasAttachments = nextAttachments.length > 0;
+    if (!trimmed && !hasAttachments) {
+      return;
+    }
+    if (pendingAttachmentCount > 0) {
       return;
     }
     if (activeThreadId && threadStatusById[activeThreadId]?.isReviewing) {
@@ -163,7 +276,11 @@ function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
       await startReview(trimmed);
       return;
     }
-    await sendUserMessage(trimmed);
+    await sendUserMessage(
+      trimmed,
+      nextAttachments.map((attachment) => ({ path: attachment.path })),
+    );
+    clearAttachments();
   }
 
   return (
@@ -302,6 +419,10 @@ function MainApp({ accessMode, onAccessModeChange }: MainAppProps) {
                     ? threadStatusById[activeThreadId]?.isReviewing ?? false
                     : false
                 }
+                isSavingAttachments={pendingAttachmentCount > 0}
+                attachments={attachments}
+                onAddAttachments={handleAddAttachments}
+                onRemoveAttachment={handleRemoveAttachment}
                 models={models}
                 selectedModelId={selectedModelId}
                 onSelectModel={setSelectedModelId}

@@ -10,6 +10,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   enableWebSearchRequest: false,
   confirmBeforeQuit: false,
   enableCompletionNotifications: false,
+  usagePollingEnabled: true,
+  usagePollingIntervalMinutes: 5,
   sidebarWidth: 280,
   glassBlurLight: 32,
   glassBlurDark: 32,

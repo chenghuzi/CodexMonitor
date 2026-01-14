@@ -3,9 +3,12 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader as StdBufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use chrono::DateTime;
 use git2::{DiffOptions, Repository, Status, StatusOptions, Tree};
 use ignore::WalkBuilder;
 use tauri::{
@@ -15,6 +18,7 @@ use tauri::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -286,6 +290,14 @@ fn default_glass_opacity_dark() -> f64 {
     1.0
 }
 
+fn default_usage_polling_enabled() -> bool {
+    true
+}
+
+fn default_usage_polling_interval_minutes() -> i64 {
+    5
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
@@ -297,6 +309,10 @@ struct AppSettings {
     confirm_before_quit: bool,
     #[serde(default)]
     enable_completion_notifications: bool,
+    #[serde(default = "default_usage_polling_enabled")]
+    usage_polling_enabled: bool,
+    #[serde(default = "default_usage_polling_interval_minutes")]
+    usage_polling_interval_minutes: i64,
     #[serde(default = "default_sidebar_width")]
     sidebar_width: i64,
     #[serde(default = "default_glass_blur_light")]
@@ -320,12 +336,55 @@ impl Default for AppSettings {
             enable_web_search_request: false,
             confirm_before_quit: false,
             enable_completion_notifications: false,
+            usage_polling_enabled: default_usage_polling_enabled(),
+            usage_polling_interval_minutes: default_usage_polling_interval_minutes(),
             sidebar_width: default_sidebar_width(),
             glass_blur_light: default_glass_blur_light(),
             glass_blur_dark: default_glass_blur_dark(),
             glass_opacity_light: default_glass_opacity_light(),
             glass_opacity_dark: default_glass_opacity_dark(),
             workspace_sidebar_expanded: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
+enum UsageSource {
+    None,
+    AppServer,
+    Sessions,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UsagePoint {
+    timestamp_ms: i64,
+    tokens: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UsageSnapshot {
+    total_tokens_24h: Option<i64>,
+    updated_at_ms: Option<i64>,
+    source: UsageSource,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UsageStore {
+    #[serde(default)]
+    app_server_points: Vec<UsagePoint>,
+    #[serde(default)]
+    last_snapshot: Option<UsageSnapshot>,
+}
+
+impl Default for UsageStore {
+    fn default() -> Self {
+        Self {
+            app_server_points: Vec::new(),
+            last_snapshot: None,
         }
     }
 }
@@ -395,6 +454,9 @@ struct AppState {
     settings: Mutex<AppSettings>,
     settings_path: PathBuf,
     allow_quit: AtomicBool,
+    usage_store: Mutex<UsageStore>,
+    usage_path: PathBuf,
+    usage_poll_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl AppState {
@@ -406,8 +468,10 @@ impl AppState {
             .to_path_buf();
         let storage_path = app_data_dir.join("workspaces.json");
         let settings_path = app_data_dir.join("settings.json");
+        let usage_path = app_data_dir.join("usage.json");
         let workspaces = read_workspaces(&storage_path).unwrap_or_default();
         let settings = read_settings(&settings_path).unwrap_or_default();
+        let usage_store = read_usage_store(&usage_path).unwrap_or_default();
         Self {
             workspaces: Mutex::new(workspaces),
             sessions: Mutex::new(HashMap::new()),
@@ -415,6 +479,9 @@ impl AppState {
             settings: Mutex::new(settings),
             settings_path,
             allow_quit: AtomicBool::new(false),
+            usage_store: Mutex::new(usage_store),
+            usage_path,
+            usage_poll_handle: Mutex::new(None),
         }
     }
 }
@@ -450,6 +517,321 @@ fn write_settings(path: &PathBuf, settings: &AppSettings) -> Result<(), String> 
     }
     let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     std::fs::write(path, data).map_err(|e| e.to_string())
+}
+
+fn read_usage_store(path: &PathBuf) -> Result<UsageStore, String> {
+    if !path.exists() {
+        return Ok(UsageStore::default());
+    }
+    let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&data).map_err(|e| e.to_string())
+}
+
+fn write_usage_store(path: &PathBuf, store: &UsageStore) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let data = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
+    std::fs::write(path, data).map_err(|e| e.to_string())
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_millis() as i64
+}
+
+fn cutoff_ms(now: i64) -> i64 {
+    now.saturating_sub(24 * 60 * 60 * 1000)
+}
+
+fn prune_points(points: &mut Vec<UsagePoint>, cutoff: i64) {
+    points.retain(|point| point.timestamp_ms >= cutoff);
+}
+
+fn sum_points(points: &[UsagePoint]) -> i64 {
+    points.iter().map(|point| point.tokens).sum()
+}
+
+fn empty_usage_snapshot() -> UsageSnapshot {
+    UsageSnapshot {
+        total_tokens_24h: None,
+        updated_at_ms: None,
+        source: UsageSource::None,
+    }
+}
+
+fn parse_rfc3339_ms(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn system_time_ms(value: SystemTime) -> Option<i64> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as i64)
+}
+
+fn resolve_codex_home() -> Option<PathBuf> {
+    if let Ok(value) = env::var("CODEX_HOME") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    if let Ok(value) = env::var("HOME") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed).join(".codex"));
+        }
+    }
+    if let Ok(value) = env::var("USERPROFILE") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed).join(".codex"));
+        }
+    }
+    None
+}
+
+fn parse_token_count_from_rollout(value: &Value) -> Option<i64> {
+    let item_type = value.get("type")?.as_str()?;
+    if item_type != "event_msg" {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    let payload_type = payload.get("type")?.as_str()?;
+    if payload_type != "token_count" {
+        return None;
+    }
+    let info = payload.get("info")?;
+    let last_usage = info
+        .get("last_token_usage")
+        .or_else(|| info.get("lastTokenUsage"))?;
+    let total_tokens = last_usage
+        .get("total_tokens")
+        .or_else(|| last_usage.get("totalTokens"))?
+        .as_i64()?;
+    if total_tokens > 0 {
+        Some(total_tokens)
+    } else {
+        None
+    }
+}
+
+fn scan_session_tokens_24h(codex_home: &Path, cutoff: i64) -> Result<Option<i64>, String> {
+    let sessions_dir = codex_home.join("sessions");
+    if !sessions_dir.exists() {
+        return Ok(None);
+    }
+
+    let mut total_tokens: i64 = 0;
+    let walker = WalkBuilder::new(&sessions_dir)
+        .follow_links(false)
+        .max_depth(Some(6))
+        .build();
+
+    for entry in walker {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .map(|file_type| file_type.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if let Ok(metadata) = entry.metadata() {
+            if let Some(modified_ms) = metadata.modified().ok().and_then(system_time_ms) {
+                if modified_ms < cutoff {
+                    continue;
+                }
+            }
+        }
+
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        let reader = StdBufReader::new(file);
+        for line in reader.lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: Value = match serde_json::from_str(trimmed) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let timestamp = value
+                .get("timestamp")
+                .and_then(|ts| ts.as_str())
+                .and_then(parse_rfc3339_ms);
+            if let Some(timestamp_ms) = timestamp {
+                if timestamp_ms < cutoff {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            if let Some(tokens) = parse_token_count_from_rollout(&value) {
+                total_tokens += tokens;
+            }
+        }
+    }
+
+    Ok(Some(total_tokens))
+}
+
+fn extract_app_server_token_delta(message: &Value) -> Option<i64> {
+    let params = message.get("params")?;
+    let token_usage = params.get("tokenUsage").or_else(|| params.get("token_usage"))?;
+    let last_usage = token_usage.get("last").or_else(|| token_usage.get("last_usage"))?;
+    let total_tokens = last_usage
+        .get("totalTokens")
+        .or_else(|| last_usage.get("total_tokens"))?
+        .as_i64()?;
+    if total_tokens > 0 {
+        Some(total_tokens)
+    } else {
+        None
+    }
+}
+
+async fn emit_usage_snapshot(app: &AppHandle, snapshot: UsageSnapshot) {
+    let _ = app.emit("usage-updated", snapshot);
+}
+
+async fn record_app_server_usage(app: &AppHandle, tokens: i64) -> Result<UsageSnapshot, String> {
+    let state = app.state::<AppState>();
+    let now = now_ms();
+    let cutoff = cutoff_ms(now);
+
+    let mut store = state.usage_store.lock().await;
+    store.app_server_points.push(UsagePoint {
+        timestamp_ms: now,
+        tokens,
+    });
+    prune_points(&mut store.app_server_points, cutoff);
+    let total = sum_points(&store.app_server_points);
+
+    let snapshot = UsageSnapshot {
+        total_tokens_24h: Some(total),
+        updated_at_ms: Some(now),
+        source: UsageSource::AppServer,
+    };
+    store.last_snapshot = Some(snapshot.clone());
+    write_usage_store(&state.usage_path, &store)?;
+    drop(store);
+
+    emit_usage_snapshot(app, snapshot.clone()).await;
+    Ok(snapshot)
+}
+
+async fn refresh_usage_snapshot(app: &AppHandle) -> Result<UsageSnapshot, String> {
+    let state = app.state::<AppState>();
+    let now = now_ms();
+    let cutoff = cutoff_ms(now);
+
+    {
+        let mut store = state.usage_store.lock().await;
+        prune_points(&mut store.app_server_points, cutoff);
+        if !store.app_server_points.is_empty() {
+            let total = sum_points(&store.app_server_points);
+            let snapshot = UsageSnapshot {
+                total_tokens_24h: Some(total),
+                updated_at_ms: Some(now),
+                source: UsageSource::AppServer,
+            };
+            store.last_snapshot = Some(snapshot.clone());
+            write_usage_store(&state.usage_path, &store)?;
+            drop(store);
+            emit_usage_snapshot(app, snapshot.clone()).await;
+            return Ok(snapshot);
+        }
+    }
+
+    let codex_home = resolve_codex_home();
+    let scan_result = if let Some(home) = codex_home {
+        let cutoff_copy = cutoff;
+        tokio::task::spawn_blocking(move || scan_session_tokens_24h(&home, cutoff_copy))
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        Ok(None)
+    };
+
+    let total_tokens = match scan_result {
+        Ok(value) => value,
+        Err(_) => {
+            let store = state.usage_store.lock().await;
+            return Ok(store
+                .last_snapshot
+                .clone()
+                .unwrap_or_else(empty_usage_snapshot));
+        }
+    };
+
+    let mut store = state.usage_store.lock().await;
+    prune_points(&mut store.app_server_points, cutoff);
+    if !store.app_server_points.is_empty() {
+        let total = sum_points(&store.app_server_points);
+        let snapshot = UsageSnapshot {
+            total_tokens_24h: Some(total),
+            updated_at_ms: Some(now),
+            source: UsageSource::AppServer,
+        };
+        store.last_snapshot = Some(snapshot.clone());
+        write_usage_store(&state.usage_path, &store)?;
+        drop(store);
+        emit_usage_snapshot(app, snapshot.clone()).await;
+        return Ok(snapshot);
+    }
+
+    let snapshot = match total_tokens {
+        Some(total) => UsageSnapshot {
+            total_tokens_24h: Some(total),
+            updated_at_ms: Some(now),
+            source: UsageSource::Sessions,
+        },
+        None => empty_usage_snapshot(),
+    };
+    store.last_snapshot = Some(snapshot.clone());
+    write_usage_store(&state.usage_path, &store)?;
+    drop(store);
+    emit_usage_snapshot(app, snapshot.clone()).await;
+    Ok(snapshot)
+}
+
+async fn restart_usage_polling(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if let Some(handle) = state.usage_poll_handle.lock().await.take() {
+        handle.abort();
+    }
+
+    let settings = state.settings.lock().await.clone();
+    if !settings.usage_polling_enabled {
+        return;
+    }
+
+    let interval_minutes = settings.usage_polling_interval_minutes.max(1).min(120);
+    let interval_duration = Duration::from_secs(interval_minutes as u64 * 60);
+    let app_handle = app.clone();
+    let handle = tokio::spawn(async move {
+        let _ = refresh_usage_snapshot(&app_handle).await;
+        let mut ticker = tokio::time::interval(interval_duration);
+        loop {
+            ticker.tick().await;
+            let _ = refresh_usage_snapshot(&app_handle).await;
+        }
+    });
+
+    *state.usage_poll_handle.lock().await = Some(handle);
 }
 
 fn workspace_sessions_path(workspace_path: &str) -> PathBuf {
@@ -539,6 +921,16 @@ async fn spawn_workspace_session(
             let has_method = value.get("method").is_some();
             let has_result_or_error =
                 value.get("result").is_some() || value.get("error").is_some();
+            let method_name = value
+                .get("method")
+                .and_then(|method| method.as_str())
+                .unwrap_or("");
+
+            if method_name == "thread/tokenUsage/updated" {
+                if let Some(tokens) = extract_app_server_token_delta(&value) {
+                    let _ = record_app_server_usage(&app_handle_clone, tokens).await;
+                }
+            }
             if let Some(id) = maybe_id {
                 if has_result_or_error {
                     if let Some(tx) = session_clone.pending.lock().await.remove(&id) {
@@ -1411,7 +1803,22 @@ async fn update_settings(
         write_settings(&state.settings_path, &settings)?;
     }
     let _ = app.emit("settings-updated", settings.clone());
+    restart_usage_polling(&app).await;
     Ok(settings)
+}
+
+#[tauri::command]
+async fn usage_get_snapshot(state: State<'_, AppState>) -> Result<UsageSnapshot, String> {
+    let store = state.usage_store.lock().await;
+    Ok(store
+        .last_snapshot
+        .clone()
+        .unwrap_or_else(empty_usage_snapshot))
+}
+
+#[tauri::command]
+async fn usage_refresh(app: AppHandle) -> Result<UsageSnapshot, String> {
+    refresh_usage_snapshot(&app).await
 }
 
 #[tauri::command]
@@ -1442,6 +1849,10 @@ pub fn run() {
         .setup(|app| {
             let state = AppState::load(&app.handle());
             app.manage(state);
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                restart_usage_polling(&app_handle).await;
+            });
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -1471,6 +1882,8 @@ pub fn run() {
             search_files,
             get_settings,
             update_settings,
+            usage_get_snapshot,
+            usage_refresh,
             confirm_quit
         ])
         .build(tauri::generate_context!())

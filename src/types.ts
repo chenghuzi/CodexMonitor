@@ -81,6 +81,14 @@ export type LocalImageInput = {
 
 export type ThemePreference = "system" | "light" | "dark";
 
+export type UsageSource = "app-server" | "sessions" | "none";
+
+export type UsageSnapshot = {
+  totalTokens24h: number | null;
+  updatedAtMs: number | null;
+  source: UsageSource;
+};
+
 export type AppSettings = {
   themePreference: ThemePreference;
   accessMode: AccessMode;
@@ -88,6 +96,8 @@ export type AppSettings = {
   enableWebSearchRequest: boolean;
   confirmBeforeQuit: boolean;
   enableCompletionNotifications: boolean;
+  usagePollingEnabled: boolean;
+  usagePollingIntervalMinutes: number;
   sidebarWidth: number;
   glassBlurLight: number;
   glassBlurDark: number;

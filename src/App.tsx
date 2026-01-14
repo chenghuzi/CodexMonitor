@@ -43,10 +43,11 @@ import { useWorkspaceRefreshOnFocus } from "./hooks/useWorkspaceRefreshOnFocus";
 import { useWorkspaceRestore } from "./hooks/useWorkspaceRestore";
 import { Settings } from "./components/Settings";
 import { useSettings } from "./hooks/useSettings";
+import { useUsage } from "./hooks/useUsage";
 import { confirmQuit, readPrompt, saveAttachment } from "./services/tauri";
 import { buildPromptSlashItems } from "./utils/slash";
 import { expandPromptTemplate, parsePromptInvocation } from "./utils/prompts";
-import type { AccessMode, ComposerAttachment } from "./types";
+import type { AccessMode, ComposerAttachment, UsageSnapshot } from "./types";
 
 type MainAppProps = {
   accessMode: AccessMode;
@@ -54,6 +55,7 @@ type MainAppProps = {
   sidebarWidth: number;
   onSidebarWidthChange: (width: number) => void;
   enableCompletionNotifications: boolean;
+  usageSnapshot: UsageSnapshot | null;
   workspaceSidebarExpanded: Record<string, boolean>;
   onWorkspaceSidebarExpandedChange: (next: Record<string, boolean>) => void;
 };
@@ -74,6 +76,7 @@ function MainApp({
   sidebarWidth: persistedSidebarWidth,
   onSidebarWidthChange,
   enableCompletionNotifications,
+  usageSnapshot,
   workspaceSidebarExpanded,
   onWorkspaceSidebarExpandedChange,
 }: MainAppProps) {
@@ -518,6 +521,7 @@ function MainApp({
         workspaces={workspaces}
         threadsByWorkspace={threadsByWorkspace}
         threadStatusById={threadStatusById}
+        usageSnapshot={usageSnapshot}
         activeWorkspaceId={activeWorkspaceId}
         activeThreadId={activeThreadId}
         expandedWorkspaceIds={expandedWorkspaceIds}
@@ -699,6 +703,7 @@ export default App;
 function App() {
   const [route, setRoute] = useState(() => window.location.hash);
   const { settings, updateSettings } = useSettings();
+  const { snapshot: usageSnapshot } = useUsage(settings);
 
   useEffect(() => {
     const handleHashChange = () => setRoute(window.location.hash);
@@ -722,6 +727,7 @@ function App() {
       sidebarWidth={settings.sidebarWidth}
       onSidebarWidthChange={(width) => updateSettings({ sidebarWidth: width })}
       enableCompletionNotifications={settings.enableCompletionNotifications}
+      usageSnapshot={usageSnapshot}
       workspaceSidebarExpanded={settings.workspaceSidebarExpanded}
       onWorkspaceSidebarExpandedChange={(next) =>
         updateSettings({ workspaceSidebarExpanded: next })

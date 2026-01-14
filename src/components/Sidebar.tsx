@@ -1,4 +1,4 @@
-import type { ThreadSummary, WorkspaceInfo } from "../types";
+import type { ThreadSummary, UsageSnapshot, WorkspaceInfo } from "../types";
 import { useState } from "react";
 import { Menu, MenuItem } from "@tauri-apps/api/menu";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
@@ -11,6 +11,7 @@ type SidebarProps = {
     string,
     { isProcessing: boolean; hasUnread: boolean; isReviewing: boolean }
   >;
+  usageSnapshot: UsageSnapshot | null;
   activeWorkspaceId: string | null;
   activeThreadId: string | null;
   expandedWorkspaceIds: Record<string, boolean>;
@@ -31,6 +32,7 @@ export function Sidebar({
   workspaces,
   threadsByWorkspace,
   threadStatusById,
+  usageSnapshot,
   activeWorkspaceId,
   activeThreadId,
   expandedWorkspaceIds,
@@ -51,6 +53,18 @@ export function Sidebar({
     threadId: string;
   } | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const totalTokens = usageSnapshot?.totalTokens24h ?? null;
+  const totalLabel = totalTokens == null ? "—" : totalTokens.toLocaleString();
+  const updatedAtLabel =
+    usageSnapshot?.updatedAtMs != null
+      ? new Date(usageSnapshot.updatedAtMs).toLocaleTimeString()
+      : "—";
+  const sourceLabel =
+    usageSnapshot?.source === "app-server"
+      ? "app-server"
+      : usageSnapshot?.source === "sessions"
+        ? "sessions"
+        : "unknown";
 
   function startRename(
     workspaceId: string,
@@ -438,6 +452,14 @@ export function Sidebar({
         {!workspaces.length && (
           <div className="empty">Add a workspace to start.</div>
         )}
+      </div>
+      <div className="sidebar-footer" data-tauri-drag-region="false">
+        <div className="sidebar-footer-label">24h tokens</div>
+        <div className="sidebar-footer-value">{totalLabel}</div>
+        <div className="sidebar-footer-meta">
+          {`Source: ${sourceLabel}`}
+          {updatedAtLabel !== "—" ? ` · Updated: ${updatedAtLabel}` : ""}
+        </div>
       </div>
     </aside>
   );

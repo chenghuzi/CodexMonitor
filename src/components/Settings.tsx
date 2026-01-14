@@ -244,6 +244,53 @@ export function Settings({ settings, onUpdateSettings }: SettingsProps) {
             </div>
           </div>
           <div className="settings-card">
+            <div className="settings-card-title">Usage polling</div>
+            <div className="settings-toggle">
+              <input
+                id="usage-polling-enabled"
+                type="checkbox"
+                checked={settings.usagePollingEnabled}
+                onChange={(event) =>
+                  onUpdateSettings({
+                    usagePollingEnabled: event.target.checked,
+                  })
+                }
+              />
+              <label htmlFor="usage-polling-enabled">
+                Enable background usage refresh
+              </label>
+            </div>
+            <div className="settings-field">
+              <label
+                className="settings-label"
+                htmlFor="usage-polling-interval"
+              >
+                Refresh interval (minutes)
+              </label>
+              <input
+                id="usage-polling-interval"
+                className="settings-select"
+                type="number"
+                min="1"
+                max="120"
+                step="1"
+                value={settings.usagePollingIntervalMinutes}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  if (!Number.isFinite(value)) {
+                    return;
+                  }
+                  const next = Math.max(1, Math.min(120, Math.round(value)));
+                  onUpdateSettings({ usagePollingIntervalMinutes: next });
+                }}
+                disabled={!settings.usagePollingEnabled}
+              />
+            </div>
+            <div className="settings-help">
+              Controls how often the app refreshes usage data for the sidebar.
+            </div>
+          </div>
+          <div className="settings-card">
             <div className="settings-card-title">Advanced runtime flags</div>
             <div className="settings-toggle">
               <input

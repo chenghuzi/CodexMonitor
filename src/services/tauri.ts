@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AppSettings,
   LocalImageInput,
+  UsageSnapshot,
   WorkspaceInfo,
   WorkspaceSessionStore,
 } from "../types";
@@ -172,6 +173,14 @@ export async function getSettings(): Promise<AppSettings> {
 
 export async function updateSettings(settings: AppSettings): Promise<AppSettings> {
   return invoke<AppSettings>("update_settings", { settings });
+}
+
+export async function getUsageSnapshot(): Promise<UsageSnapshot> {
+  return invoke<UsageSnapshot>("usage_get_snapshot");
+}
+
+export async function refreshUsageSnapshot(): Promise<UsageSnapshot> {
+  return invoke<UsageSnapshot>("usage_refresh");
 }
 
 export async function confirmQuit(): Promise<void> {

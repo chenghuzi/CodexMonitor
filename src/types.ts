@@ -87,6 +87,18 @@ export type UsageSnapshot = {
   totalTokens24h: number | null;
   updatedAtMs: number | null;
   source: UsageSource;
+  rateLimits: RateLimitSnapshot | null;
+};
+
+export type RateLimitWindow = {
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+};
+
+export type RateLimitSnapshot = {
+  primary: RateLimitWindow | null;
+  secondary: RateLimitWindow | null;
 };
 
 export type AppSettings = {

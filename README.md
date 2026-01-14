@@ -2,6 +2,11 @@
 
 *In Codex (gpt-5.2-codex xhigh) we trust — so we build a GUI it deserves.*
 
+**⬇️ Download Latest Release:** https://github.com/chenghuzi/Codexola/releases/latest
+
+[![Build Universal DMG](https://github.com/chenghuzi/Codexola/actions/workflows/build-dmg.yml/badge.svg)](https://github.com/chenghuzi/Codexola/actions/workflows/build-dmg.yml)
+[![Latest Release](https://img.shields.io/github/v/release/chenghuzi/Codexola)](https://github.com/chenghuzi/Codexola/releases/latest)
+
 Forked from https://github.com/Dimillian/CodexMonitor.git (MIT License). This project has diverged.
 
 [English](README.md) | [中文](README.zh.md)
@@ -18,6 +23,8 @@ Codexola is a macOS Tauri app for orchestrating multiple Codex agents across loc
 - Thread restore and filtering by workspace `cwd`.
 - Per-workspace thread management (rename, archive/unarchive, copy IDs).
 - Image attachments upload and chat history rendering.
+- Usage and rate limits in the sidebar (24h tokens, 5h/7d limits, source + updated time).
+- Usage polling controls in Settings for background refresh.
 - Light and dark themes.
 
 ## Features

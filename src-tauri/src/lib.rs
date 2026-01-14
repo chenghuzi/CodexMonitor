@@ -369,6 +369,7 @@ struct UsageSnapshot {
     total_tokens_24h: Option<i64>,
     updated_at_ms: Option<i64>,
     source: UsageSource,
+    rate_limits: Option<RateLimitSnapshot>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -378,6 +379,8 @@ struct UsageStore {
     app_server_points: Vec<UsagePoint>,
     #[serde(default)]
     last_snapshot: Option<UsageSnapshot>,
+    #[serde(default)]
+    last_rate_limits: Option<RateLimitSnapshot>,
 }
 
 impl Default for UsageStore {
@@ -385,8 +388,24 @@ impl Default for UsageStore {
         Self {
             app_server_points: Vec::new(),
             last_snapshot: None,
+            last_rate_limits: None,
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitWindow {
+    used_percent: i64,
+    window_duration_mins: Option<i64>,
+    resets_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitSnapshot {
+    primary: Option<RateLimitWindow>,
+    secondary: Option<RateLimitWindow>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -457,6 +476,7 @@ struct AppState {
     usage_store: Mutex<UsageStore>,
     usage_path: PathBuf,
     usage_poll_handle: Mutex<Option<JoinHandle<()>>>,
+    usage_probe_inflight: AtomicBool,
 }
 
 impl AppState {
@@ -482,6 +502,7 @@ impl AppState {
             usage_store: Mutex::new(usage_store),
             usage_path,
             usage_poll_handle: Mutex::new(None),
+            usage_probe_inflight: AtomicBool::new(false),
         }
     }
 }
@@ -559,6 +580,7 @@ fn empty_usage_snapshot() -> UsageSnapshot {
         total_tokens_24h: None,
         updated_at_ms: None,
         source: UsageSource::None,
+        rate_limits: None,
     }
 }
 
@@ -620,6 +642,46 @@ fn parse_token_count_from_rollout(value: &Value) -> Option<i64> {
     } else {
         None
     }
+}
+
+fn parse_used_percent(value: &Value) -> Option<i64> {
+    if let Some(int) = value.as_i64() {
+        return Some(int);
+    }
+    value.as_f64().map(|float| float.round() as i64)
+}
+
+fn parse_rate_limit_window(value: &Value) -> Option<RateLimitWindow> {
+    let used_percent = value
+        .get("usedPercent")
+        .or_else(|| value.get("used_percent"))
+        .and_then(parse_used_percent)?;
+    let window_duration_mins = value
+        .get("windowDurationMins")
+        .or_else(|| value.get("window_duration_mins"))
+        .and_then(|value| value.as_i64());
+    let resets_at = value
+        .get("resetsAt")
+        .or_else(|| value.get("resets_at"))
+        .and_then(|value| value.as_i64());
+    Some(RateLimitWindow {
+        used_percent,
+        window_duration_mins,
+        resets_at,
+    })
+}
+
+fn parse_rate_limits_from_container(container: &Value) -> Option<RateLimitSnapshot> {
+    let rate_limits = container
+        .get("rateLimits")
+        .or_else(|| container.get("rate_limits"))?;
+    let primary = rate_limits
+        .get("primary")
+        .and_then(|value| parse_rate_limit_window(value));
+    let secondary = rate_limits
+        .get("secondary")
+        .and_then(|value| parse_rate_limit_window(value));
+    Some(RateLimitSnapshot { primary, secondary })
 }
 
 fn scan_session_tokens_24h(codex_home: &Path, cutoff: i64) -> Result<Option<i64>, String> {
@@ -719,11 +781,13 @@ async fn record_app_server_usage(app: &AppHandle, tokens: i64) -> Result<UsageSn
     });
     prune_points(&mut store.app_server_points, cutoff);
     let total = sum_points(&store.app_server_points);
+    let rate_limits = store.last_rate_limits.clone();
 
     let snapshot = UsageSnapshot {
         total_tokens_24h: Some(total),
         updated_at_ms: Some(now),
         source: UsageSource::AppServer,
+        rate_limits,
     };
     store.last_snapshot = Some(snapshot.clone());
     write_usage_store(&state.usage_path, &store)?;
@@ -733,10 +797,164 @@ async fn record_app_server_usage(app: &AppHandle, tokens: i64) -> Result<UsageSn
     Ok(snapshot)
 }
 
+async fn record_rate_limits(
+    app: &AppHandle,
+    rate_limits: RateLimitSnapshot,
+) -> Result<UsageSnapshot, String> {
+    let state = app.state::<AppState>();
+    let now = now_ms();
+    let cutoff = cutoff_ms(now);
+    let mut store = state.usage_store.lock().await;
+    prune_points(&mut store.app_server_points, cutoff);
+    store.last_rate_limits = Some(rate_limits.clone());
+    let total_tokens_24h = if !store.app_server_points.is_empty() {
+        Some(sum_points(&store.app_server_points))
+    } else {
+        store.last_snapshot.as_ref().and_then(|snapshot| snapshot.total_tokens_24h)
+    };
+    let snapshot = UsageSnapshot {
+        total_tokens_24h,
+        updated_at_ms: Some(now),
+        source: UsageSource::AppServer,
+        rate_limits: Some(rate_limits),
+    };
+    store.last_snapshot = Some(snapshot.clone());
+    write_usage_store(&state.usage_path, &store)?;
+    drop(store);
+    emit_usage_snapshot(app, snapshot.clone()).await;
+    Ok(snapshot)
+}
+
+async fn fetch_rate_limits_via_app_server(
+    codex_bin: String,
+    settings: AppSettings,
+) -> Result<Option<RateLimitSnapshot>, String> {
+    let mut command = Command::new(codex_bin);
+    if settings.bypass_approvals_and_sandbox {
+        command.arg("--dangerously-bypass-approvals-and-sandbox");
+    }
+    if settings.enable_web_search_request {
+        command.arg("--enable").arg("web_search_request");
+    }
+    command.arg("app-server");
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("missing stdin")?;
+    let stdout = child.stdout.take().ok_or("missing stdout")?;
+    let stderr = child.stderr.take().ok_or("missing stderr")?;
+
+    tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(_)) = lines.next_line().await {}
+    });
+
+    let mut lines = BufReader::new(stdout).lines();
+    let init = json!({
+        "id": 1,
+        "method": "initialize",
+        "params": { "clientInfo": { "name": "codexola", "version": "0.1.0" } }
+    });
+    let mut line = serde_json::to_string(&init).map_err(|e| e.to_string())?;
+    line.push('\n');
+    stdin.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+    let initialized = json!({ "method": "initialized" });
+    let mut line = serde_json::to_string(&initialized).map_err(|e| e.to_string())?;
+    line.push('\n');
+    stdin.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+
+    let request = json!({
+        "id": 2,
+        "method": "account/rateLimits/read",
+        "params": {}
+    });
+    let mut line = serde_json::to_string(&request).map_err(|e| e.to_string())?;
+    line.push('\n');
+    stdin.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+
+    let mut result: Option<RateLimitSnapshot> = None;
+    while let Ok(Some(line)) = lines.next_line().await {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let id = value.get("id").and_then(|id| id.as_i64());
+        if id == Some(2) {
+            if value.get("error").is_some() {
+                break;
+            }
+            let result_value = value.get("result").cloned().unwrap_or_default();
+            result = parse_rate_limits_from_container(&result_value);
+            break;
+        }
+    }
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    Ok(result)
+}
+
+async fn probe_rate_limits_via_temp_app_server(
+    app: &AppHandle,
+) -> Result<Option<RateLimitSnapshot>, String> {
+    let state = app.state::<AppState>();
+    if state
+        .usage_probe_inflight
+        .swap(true, Ordering::SeqCst)
+    {
+        return Ok(None);
+    }
+
+    let settings = state.settings.lock().await.clone();
+    let codex_bin = {
+        let workspaces = state.workspaces.lock().await;
+        workspaces
+            .values()
+            .find_map(|entry| entry.codex_bin.clone())
+            .unwrap_or_else(|| "codex".to_string())
+    };
+    let result = fetch_rate_limits_via_app_server(codex_bin, settings).await;
+    state.usage_probe_inflight.store(false, Ordering::SeqCst);
+    result
+}
+
+async fn fetch_rate_limits_from_any_session(
+    state: &AppState,
+) -> Result<Option<RateLimitSnapshot>, String> {
+    let session = {
+        let sessions = state.sessions.lock().await;
+        sessions.values().next().cloned()
+    };
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let response = session
+        .send_request("account/rateLimits/read", json!({}))
+        .await?;
+    let result = response.get("result").cloned().unwrap_or_default();
+    Ok(parse_rate_limits_from_container(&result))
+}
+
 async fn refresh_usage_snapshot(app: &AppHandle) -> Result<UsageSnapshot, String> {
     let state = app.state::<AppState>();
     let now = now_ms();
     let cutoff = cutoff_ms(now);
+    let mut rate_limits = match fetch_rate_limits_from_any_session(&state).await {
+        Ok(rate_limits) => rate_limits,
+        Err(_) => None,
+    };
+    if rate_limits.is_none() {
+        rate_limits = match probe_rate_limits_via_temp_app_server(app).await {
+            Ok(rate_limits) => rate_limits,
+            Err(_) => None,
+        };
+    }
 
     {
         let mut store = state.usage_store.lock().await;
@@ -747,8 +965,12 @@ async fn refresh_usage_snapshot(app: &AppHandle) -> Result<UsageSnapshot, String
                 total_tokens_24h: Some(total),
                 updated_at_ms: Some(now),
                 source: UsageSource::AppServer,
+                rate_limits: rate_limits.clone().or_else(|| store.last_rate_limits.clone()),
             };
             store.last_snapshot = Some(snapshot.clone());
+            if rate_limits.is_some() {
+                store.last_rate_limits = rate_limits.clone();
+            }
             write_usage_store(&state.usage_path, &store)?;
             drop(store);
             emit_usage_snapshot(app, snapshot.clone()).await;
@@ -785,8 +1007,12 @@ async fn refresh_usage_snapshot(app: &AppHandle) -> Result<UsageSnapshot, String
             total_tokens_24h: Some(total),
             updated_at_ms: Some(now),
             source: UsageSource::AppServer,
+            rate_limits: rate_limits.clone().or_else(|| store.last_rate_limits.clone()),
         };
         store.last_snapshot = Some(snapshot.clone());
+        if rate_limits.is_some() {
+            store.last_rate_limits = rate_limits.clone();
+        }
         write_usage_store(&state.usage_path, &store)?;
         drop(store);
         emit_usage_snapshot(app, snapshot.clone()).await;
@@ -798,10 +1024,17 @@ async fn refresh_usage_snapshot(app: &AppHandle) -> Result<UsageSnapshot, String
             total_tokens_24h: Some(total),
             updated_at_ms: Some(now),
             source: UsageSource::Sessions,
+            rate_limits: rate_limits.clone().or_else(|| store.last_rate_limits.clone()),
         },
-        None => empty_usage_snapshot(),
+        None => UsageSnapshot {
+            rate_limits: rate_limits.clone().or_else(|| store.last_rate_limits.clone()),
+            ..empty_usage_snapshot()
+        },
     };
     store.last_snapshot = Some(snapshot.clone());
+    if rate_limits.is_some() {
+        store.last_rate_limits = rate_limits.clone();
+    }
     write_usage_store(&state.usage_path, &store)?;
     drop(store);
     emit_usage_snapshot(app, snapshot.clone()).await;
@@ -929,6 +1162,13 @@ async fn spawn_workspace_session(
             if method_name == "thread/tokenUsage/updated" {
                 if let Some(tokens) = extract_app_server_token_delta(&value) {
                     let _ = record_app_server_usage(&app_handle_clone, tokens).await;
+                }
+            }
+            if method_name == "account/rateLimits/updated" {
+                if let Some(params) = value.get("params") {
+                    if let Some(rate_limits) = parse_rate_limits_from_container(params) {
+                        let _ = record_rate_limits(&app_handle_clone, rate_limits).await;
+                    }
                 }
             }
             if let Some(id) = maybe_id {

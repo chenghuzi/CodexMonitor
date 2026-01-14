@@ -1,4 +1,9 @@
-import type { ThreadSummary, UsageSnapshot, WorkspaceInfo } from "../types";
+import type {
+  RateLimitSnapshot,
+  ThreadSummary,
+  UsageSnapshot,
+  WorkspaceInfo,
+} from "../types";
 import { useState } from "react";
 import { Menu, MenuItem } from "@tauri-apps/api/menu";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
@@ -65,6 +70,8 @@ export function Sidebar({
       : usageSnapshot?.source === "sessions"
         ? "sessions"
         : "unknown";
+  const rateLimits = usageSnapshot?.rateLimits ?? null;
+  const rateLimitsLabel = formatRateLimits(rateLimits);
 
   function startRename(
     workspaceId: string,
@@ -456,6 +463,9 @@ export function Sidebar({
       <div className="sidebar-footer" data-tauri-drag-region="false">
         <div className="sidebar-footer-label">24h tokens</div>
         <div className="sidebar-footer-value">{totalLabel}</div>
+        {rateLimitsLabel && (
+          <div className="sidebar-footer-limits">{rateLimitsLabel}</div>
+        )}
         <div className="sidebar-footer-meta">
           {`Source: ${sourceLabel}`}
           {updatedAtLabel !== "—" ? ` · Updated: ${updatedAtLabel}` : ""}
@@ -463,4 +473,17 @@ export function Sidebar({
       </div>
     </aside>
   );
+}
+
+function formatRateLimits(snapshot: RateLimitSnapshot | null): string | null {
+  if (!snapshot?.primary && !snapshot?.secondary) {
+    return null;
+  }
+  const primary = snapshot.primary
+    ? `5h ${Math.round(snapshot.primary.usedPercent)}%`
+    : "5h —";
+  const secondary = snapshot.secondary
+    ? `7d ${Math.round(snapshot.secondary.usedPercent)}%`
+    : "7d —";
+  return `Limits: ${primary} · ${secondary}`;
 }

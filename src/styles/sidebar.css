@@ -395,3 +395,8 @@
 .sidebar-footer-meta {
   color: var(--text-muted);
 }
+
+.sidebar-footer-limits {
+  color: var(--text-secondary);
+  font-size: 11px;
+}

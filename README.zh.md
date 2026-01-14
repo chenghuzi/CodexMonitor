@@ -2,6 +2,11 @@
 
 *In Codex (gpt-5.2-codex xhigh) we trust — so we build a GUI it deserves.*
 
+**⬇️ 下载最新 Release：** https://github.com/chenghuzi/Codexola/releases/latest
+
+[![Build Universal DMG](https://github.com/chenghuzi/Codexola/actions/workflows/build-dmg.yml/badge.svg)](https://github.com/chenghuzi/Codexola/actions/workflows/build-dmg.yml)
+[![Latest Release](https://img.shields.io/github/v/release/chenghuzi/Codexola)](https://github.com/chenghuzi/Codexola/releases/latest)
+
 Forked from https://github.com/Dimillian/CodexMonitor.git (MIT License). 本项目已发生分叉并产生差异。
 
 [English](README.md) | [中文](README.zh.md)
@@ -17,6 +22,8 @@ Codexola 是一款 macOS Tauri 应用，用于在本地工作区编排多个 Cod
 - 线程按工作区 `cwd` 过滤，并支持恢复（resume）。
 - 工作区内线程管理（重命名、归档/取消归档、复制 ID）。
 - 图片附件上传与聊天记录展示。
+- 侧边栏显示 24h token 用量与限额（5h/7d），并标注数据来源与更新时间。
+- 设置支持用量轮询，控制后台刷新频率。
 - 亮/暗模式。
 
 ## 功能

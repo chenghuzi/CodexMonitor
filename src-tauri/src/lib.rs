@@ -572,8 +572,8 @@ async fn spawn_workspace_session(
 
     let init_params = json!({
         "clientInfo": {
-            "name": "codexia",
-            "title": "Codexia",
+            "name": "codexola",
+            "title": "Codexola",
             "version": "0.1.0"
         }
     });

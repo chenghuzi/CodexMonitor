@@ -1,4 +1,4 @@
-# Codexia
+# Codexola
 
 *In Codex (gpt-5.2-codex xhigh) we trust — so we build a GUI it deserves.*
 
@@ -6,10 +6,10 @@ Forked from https://github.com/Dimillian/CodexMonitor.git (MIT License). This pr
 
 [English](README.md) | [中文](README.zh.md)
 
-![Codexia](screenshot.png)
+![Codexola](screenshot.png)
 
 
-Codexia is a macOS Tauri app for orchestrating multiple Codex agents across local workspaces. It provides a sidebar to manage projects, a home screen for quick actions, and a conversation view backed by the Codex app-server protocol.
+Codexola is a macOS Tauri app for orchestrating multiple Codex agents across local workspaces. It provides a sidebar to manage projects, a home screen for quick actions, and a conversation view backed by the Codex app-server protocol.
 
 ## Highlights
 

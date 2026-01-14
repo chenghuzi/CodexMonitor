@@ -4,6 +4,49 @@ import type { ComposerAttachment, SlashItem } from "../types";
 import { SlashMenu } from "./SlashMenu";
 import { filterSlashItems } from "../utils/slash";
 
+const MIN_AT_QUERY_LENGTH = 1;
+
+type AtQueryState = {
+  query: string;
+  start: number;
+  end: number;
+};
+
+function findAtQuery(
+  text: string,
+  cursorIndex: number,
+  minLength: number,
+): AtQueryState | null {
+  if (cursorIndex < 0) {
+    return null;
+  }
+  const beforeCursor = text.slice(0, cursorIndex);
+  const lineStart = beforeCursor.lastIndexOf("\n") + 1;
+  const line = beforeCursor.slice(lineStart);
+  const atIndex = line.lastIndexOf("@");
+  if (atIndex < 0) {
+    return null;
+  }
+  if (atIndex > 0) {
+    const prevChar = line[atIndex - 1];
+    if (prevChar && !/\s/.test(prevChar)) {
+      return null;
+    }
+  }
+  const afterAt = line.slice(atIndex + 1);
+  if (afterAt.includes(" ")) {
+    return null;
+  }
+  if (afterAt.length < minLength) {
+    return null;
+  }
+  return {
+    query: afterAt,
+    start: lineStart + atIndex,
+    end: cursorIndex,
+  };
+}
+
 type ComposerProps = {
   onSend: (text: string, attachments: ComposerAttachment[]) => void;
   disabled?: boolean;
@@ -21,6 +64,8 @@ type ComposerProps = {
   onSelectAccessMode: (mode: "read-only" | "current" | "full-access") => void;
   skills: { name: string; description?: string }[];
   slashItems: SlashItem[];
+  fileItems: SlashItem[];
+  onAtQueryChange: (query: string | null) => void;
 };
 
 export function Composer({
@@ -40,9 +85,12 @@ export function Composer({
   onSelectAccessMode,
   skills,
   slashItems,
+  fileItems,
+  onAtQueryChange,
 }: ComposerProps) {
   const [text, setText] = useState("");
-  const [slashIndex, setSlashIndex] = useState(0);
+  const [completionIndex, setCompletionIndex] = useState(0);
+  const [cursorIndex, setCursorIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const canSend = useMemo(
     () => !disabled && !isSavingAttachments && (!!text.trim() || attachments.length > 0),
@@ -69,18 +117,44 @@ export function Composer({
     return filterSlashItems(slashItems, slashQuery);
   }, [isSlashOpen, slashItems, slashQuery]);
 
+  const atState = useMemo(() => {
+    if (disabled || isSlashOpen) {
+      return null;
+    }
+    return findAtQuery(text, cursorIndex, MIN_AT_QUERY_LENGTH);
+  }, [cursorIndex, disabled, isSlashOpen, text]);
+  const atQuery = atState?.query ?? null;
+  const isAtOpen = Boolean(atQuery && !disabled && !isSlashOpen);
+  const activeItems = isSlashOpen
+    ? filteredSlashItems
+    : isAtOpen
+      ? fileItems
+      : [];
+  const isCompletionOpen = isSlashOpen || isAtOpen;
+
   useEffect(() => {
-    if (!isSlashOpen) {
-      setSlashIndex(0);
+    if (!isCompletionOpen) {
+      setCompletionIndex(0);
       return;
     }
-    setSlashIndex((prev) => {
-      if (filteredSlashItems.length === 0) {
+    setCompletionIndex(0);
+  }, [atQuery, isCompletionOpen, slashQuery]);
+
+  useEffect(() => {
+    if (!isCompletionOpen) {
+      return;
+    }
+    setCompletionIndex((prev) => {
+      if (activeItems.length === 0) {
         return 0;
       }
-      return Math.min(prev, filteredSlashItems.length - 1);
+      return Math.min(prev, activeItems.length - 1);
     });
-  }, [filteredSlashItems.length, isSlashOpen, slashQuery]);
+  }, [activeItems.length, isCompletionOpen]);
+
+  useEffect(() => {
+    onAtQueryChange(atQuery);
+  }, [atQuery, onAtQueryChange]);
 
   const handleSend = useCallback(() => {
     if (!canSend) {
@@ -88,15 +162,54 @@ export function Composer({
     }
     onSend(text, attachments);
     setText("");
+    setCursorIndex(0);
   }, [attachments, canSend, onSend, text]);
 
-  const handleSelectSlashItem = useCallback((item: SlashItem) => {
-    setText(item.insertText);
-    setSlashIndex(0);
+  const applyText = useCallback((nextText: string, nextCursor?: number) => {
+    const cursor = nextCursor ?? nextText.length;
+    setText(nextText);
+    setCursorIndex(cursor);
+    setCompletionIndex(0);
     requestAnimationFrame(() => {
-      textareaRef.current?.focus();
+      const target = textareaRef.current;
+      if (!target) {
+        return;
+      }
+      target.focus();
+      target.setSelectionRange(cursor, cursor);
     });
   }, []);
+
+  const handleSelectSlashItem = useCallback(
+    (item: SlashItem) => {
+      applyText(item.insertText, item.insertText.length);
+    },
+    [applyText],
+  );
+
+  const handleSelectFileItem = useCallback(
+    (item: SlashItem) => {
+      if (!atState) {
+        applyText(item.insertText, item.insertText.length);
+        return;
+      }
+      const before = text.slice(0, atState.start);
+      const after = text.slice(atState.end);
+      const nextText = `${before}${item.insertText}${after}`;
+      const cursor = before.length + item.insertText.length;
+      applyText(nextText, cursor);
+    },
+    [applyText, atState, text],
+  );
+
+  const clearAtQuery = useCallback(() => {
+    if (!atState) {
+      return;
+    }
+    const before = text.slice(0, atState.start);
+    const after = text.slice(atState.end);
+    applyText(`${before}${after}`, atState.start);
+  }, [applyText, atState, text]);
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -151,19 +264,22 @@ export function Composer({
     [disabled, onAddAttachments],
   );
 
-  const handleSelectSkill = useCallback((name: string) => {
-    const snippet = `$${name}`;
-    setText((prev) => {
-      const trimmed = prev.trim();
+  const handleSelectSkill = useCallback(
+    (name: string) => {
+      const snippet = `$${name}`;
+      const trimmed = text.trim();
       if (!trimmed) {
-        return snippet + " ";
+        applyText(`${snippet} `);
+        return;
       }
       if (trimmed.includes(snippet)) {
-        return prev;
+        applyText(text);
+        return;
       }
-      return `${prev.trim()} ${snippet} `;
-    });
-  }, []);
+      applyText(`${text.trim()} ${snippet} `);
+    },
+    [applyText, text],
+  );
 
   return (
     <footer className={`composer${disabled ? " is-disabled" : ""}`}>
@@ -176,12 +292,28 @@ export function Composer({
                 : "Ask Codex to do something... (paste or drop images)"
             }
             value={text}
-            onChange={(event) => setText(event.target.value)}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              setText(nextValue);
+              setCursorIndex(event.target.selectionStart ?? nextValue.length);
+            }}
             disabled={disabled}
             onPaste={handlePaste}
             onDragOver={handleDragOver}
             onDrop={handleDrop}
             ref={textareaRef}
+            onSelect={(event) => {
+              const target = event.currentTarget;
+              setCursorIndex(target.selectionStart ?? target.value.length);
+            }}
+            onClick={(event) => {
+              const target = event.currentTarget;
+              setCursorIndex(target.selectionStart ?? target.value.length);
+            }}
+            onKeyUp={(event) => {
+              const target = event.currentTarget;
+              setCursorIndex(target.selectionStart ?? target.value.length);
+            }}
             onKeyDown={(event) => {
               if (disabled) {
                 return;
@@ -191,35 +323,42 @@ export function Composer({
                 handleSend();
                 return;
               }
-              if (isSlashOpen) {
+              if (isCompletionOpen) {
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
-                  if (filteredSlashItems.length > 0) {
-                    setSlashIndex((prev) =>
-                      (prev + 1) % filteredSlashItems.length,
+                  if (activeItems.length > 0) {
+                    setCompletionIndex((prev) =>
+                      (prev + 1) % activeItems.length,
                     );
                   }
                   return;
                 }
                 if (event.key === "ArrowUp") {
                   event.preventDefault();
-                  if (filteredSlashItems.length > 0) {
-                    setSlashIndex((prev) =>
-                      (prev - 1 + filteredSlashItems.length) %
-                      filteredSlashItems.length,
+                  if (activeItems.length > 0) {
+                    setCompletionIndex((prev) =>
+                      (prev - 1 + activeItems.length) % activeItems.length,
                     );
                   }
                   return;
                 }
                 if (event.key === "Enter") {
-                  if (filteredSlashItems.length > 0) {
+                  if (activeItems.length > 0) {
                     event.preventDefault();
-                    handleSelectSlashItem(filteredSlashItems[slashIndex]);
+                    if (isSlashOpen) {
+                      handleSelectSlashItem(activeItems[completionIndex]);
+                    } else {
+                      handleSelectFileItem(activeItems[completionIndex]);
+                    }
                   }
                 }
                 if (event.key === "Escape") {
                   event.preventDefault();
-                  setText("");
+                  if (isSlashOpen) {
+                    applyText("", 0);
+                  } else {
+                    clearAtQuery();
+                  }
                 }
               }
             }}
@@ -227,9 +366,19 @@ export function Composer({
           {isSlashOpen && (
             <SlashMenu
               items={filteredSlashItems}
-              selectedIndex={slashIndex}
+              selectedIndex={completionIndex}
               onSelect={handleSelectSlashItem}
-              onHover={(index) => setSlashIndex(index)}
+              onHover={(index) => setCompletionIndex(index)}
+              emptyLabel="No prompts found."
+            />
+          )}
+          {isAtOpen && (
+            <SlashMenu
+              items={fileItems}
+              selectedIndex={completionIndex}
+              onSelect={handleSelectFileItem}
+              onHover={(index) => setCompletionIndex(index)}
+              emptyLabel="No files found."
             />
           )}
           {attachments.length > 0 && (

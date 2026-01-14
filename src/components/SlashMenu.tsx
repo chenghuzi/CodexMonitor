@@ -5,6 +5,7 @@ type SlashMenuProps = {
   selectedIndex: number;
   onSelect: (item: SlashItem) => void;
   onHover: (index: number) => void;
+  emptyLabel?: string;
 };
 
 export function SlashMenu({
@@ -12,11 +13,12 @@ export function SlashMenu({
   selectedIndex,
   onSelect,
   onHover,
+  emptyLabel = "No results found.",
 }: SlashMenuProps) {
   if (items.length === 0) {
     return (
       <div className="composer-slash-menu" role="listbox">
-        <div className="composer-slash-empty">No prompts found.</div>
+        <div className="composer-slash-empty">{emptyLabel}</div>
       </div>
     );
   }

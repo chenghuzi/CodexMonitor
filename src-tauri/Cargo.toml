@@ -27,3 +27,4 @@ tokio = { version = "1", features = ["io-util", "process", "rt", "sync"] }
 uuid = { version = "1", features = ["v4"] }
 tauri-plugin-dialog = "2"
 git2 = { version = "0.20.3", default-features = false }
+ignore = "0.4"

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use git2::{DiffOptions, Repository, Status, StatusOptions, Tree};
+use ignore::WalkBuilder;
 use tauri::{
     menu::{Menu, MenuItem, MenuItemKind},
     AppHandle, Emitter, Manager, State,
@@ -61,6 +62,17 @@ struct PromptFrontMatter {
 
 fn normalize_git_path(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn is_excluded_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| matches!(name, ".git" | ".codex" | "node_modules"))
+        .unwrap_or(false)
 }
 
 fn diff_stats_for_path(
@@ -992,6 +1004,95 @@ async fn prompt_read(name: String) -> Result<PromptFile, String> {
 }
 
 #[tauri::command]
+async fn search_files(
+    workspace_id: String,
+    query: String,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let trimmed = query.trim().to_lowercase();
+    if trimmed.len() < 1 {
+        return Ok(Vec::new());
+    }
+    let workspaces = state.workspaces.lock().await;
+    let entry = workspaces
+        .get(&workspace_id)
+        .ok_or("workspace not found")?
+        .clone();
+    drop(workspaces);
+
+    let root = PathBuf::from(entry.path);
+    let limit = limit.unwrap_or(200);
+    let max_scan = limit.saturating_mul(5).max(limit).max(200);
+    let results = tokio::task::spawn_blocking(move || {
+        let mut matches: Vec<String> = Vec::new();
+        let walker = WalkBuilder::new(&root)
+            .filter_entry(|entry| {
+                if entry.depth() == 0 {
+                    return true;
+                }
+                if entry
+                    .file_type()
+                    .map(|file_type| file_type.is_dir())
+                    .unwrap_or(false)
+                    && is_excluded_dir(entry.path())
+                {
+                    return false;
+                }
+                true
+            })
+            .build();
+
+        for entry in walker {
+            let entry = match entry {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if !entry
+                .file_type()
+                .map(|file_type| file_type.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let relative = match entry.path().strip_prefix(&root) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let relative_string = normalize_path(relative);
+            let lower = relative_string.to_lowercase();
+            if !lower.contains(&trimmed) {
+                continue;
+            }
+            matches.push(relative_string);
+            if matches.len() >= max_scan {
+                break;
+            }
+        }
+
+        matches.sort_by(|a, b| {
+            let a_lower = a.to_lowercase();
+            let b_lower = b.to_lowercase();
+            let a_starts = a_lower.starts_with(&trimmed);
+            let b_starts = b_lower.starts_with(&trimmed);
+            if a_starts && !b_starts {
+                return std::cmp::Ordering::Less;
+            }
+            if !a_starts && b_starts {
+                return std::cmp::Ordering::Greater;
+            }
+            a_lower.cmp(&b_lower)
+        });
+        matches.truncate(limit);
+        Ok::<Vec<String>, String>(matches)
+    })
+    .await
+    .map_err(|_| "search failed".to_string())??;
+
+    Ok(results)
+}
+
+#[tauri::command]
 async fn respond_to_server_request(
     workspace_id: String,
     request_id: u64,
@@ -1367,6 +1468,7 @@ pub fn run() {
             skills_list,
             prompts_list,
             prompt_read,
+            search_files,
             get_settings,
             update_settings,
             confirm_quit

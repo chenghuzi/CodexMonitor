@@ -126,6 +126,14 @@ export async function readPrompt(name: string): Promise<PromptFile> {
   return invoke<PromptFile>("prompt_read", { name });
 }
 
+export async function searchFiles(
+  workspaceId: string,
+  query: string,
+  limit?: number,
+): Promise<string[]> {
+  return invoke<string[]>("search_files", { workspaceId, query, limit });
+}
+
 export async function listThreads(
   workspaceId: string,
   cursor?: string | null,

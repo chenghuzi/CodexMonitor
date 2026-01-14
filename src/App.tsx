@@ -37,6 +37,7 @@ import { useGitDiffs } from "./hooks/useGitDiffs";
 import { useModels } from "./hooks/useModels";
 import { useSkills } from "./hooks/useSkills";
 import { usePrompts } from "./hooks/usePrompts";
+import { useFileSearch } from "./hooks/useFileSearch";
 import { useDebugLog } from "./hooks/useDebugLog";
 import { useWorkspaceRefreshOnFocus } from "./hooks/useWorkspaceRefreshOnFocus";
 import { useWorkspaceRestore } from "./hooks/useWorkspaceRestore";
@@ -127,6 +128,29 @@ function MainApp({
   const { skills } = useSkills({ activeWorkspace, onDebug: addDebugEntry });
   const { prompts } = usePrompts({ onDebug: addDebugEntry });
   const slashItems = useMemo(() => buildPromptSlashItems(prompts), [prompts]);
+  const [atQuery, setAtQuery] = useState<string | null>(null);
+  const { items: fileMatches } = useFileSearch({
+    workspaceId: activeWorkspaceId,
+    query: atQuery,
+    onDebug: addDebugEntry,
+  });
+  const fileItems = useMemo(
+    () =>
+      fileMatches.map((path) => {
+        const normalized = path.replace(/\\/g, "/");
+        const parts = normalized.split("/");
+        const title = parts.pop() ?? normalized;
+        const description = parts.length > 0 ? parts.join("/") : undefined;
+        return {
+          id: `file:${normalized}`,
+          kind: "file" as const,
+          title,
+          description,
+          insertText: `@${normalized} `,
+        };
+      }),
+    [fileMatches],
+  );
 
   const resolvedModel = selectedModel?.model ?? null;
   const fileStatus =
@@ -648,6 +672,8 @@ function MainApp({
                 onSelectAccessMode={onAccessModeChange}
                 skills={skills}
                 slashItems={slashItems}
+                fileItems={fileItems}
+                onAtQueryChange={setAtQuery}
               />
             )}
             <DebugPanel

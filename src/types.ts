@@ -147,7 +147,7 @@ export type PromptFile = {
 
 export type SlashItem = {
   id: string;
-  kind: "prompt";
+  kind: "prompt" | "file";
   title: string;
   description?: string;
   hint?: string;

@@ -119,6 +119,7 @@ function MainApp({
     setActiveWorkspaceId,
     addWorkspace,
     connectWorkspace,
+    removeWorkspace,
     markWorkspaceConnected,
     hasLoaded,
     refreshWorkspaces,
@@ -189,6 +190,7 @@ function MainApp({
     threadStatusById,
     renameThread,
     setThreadArchived,
+    removeWorkspaceState,
     startThreadForWorkspace,
     listThreadsForWorkspace,
     sendUserMessage,
@@ -407,6 +409,26 @@ function MainApp({
     [expandedWorkspaceIds, onWorkspaceSidebarExpandedChange],
   );
 
+  const handleRemoveWorkspace = useCallback(
+    async (workspace: (typeof workspaces)[number]) => {
+      exitDiffView();
+      const workspaceId = workspace.id;
+      await removeWorkspace(workspaceId);
+      removeWorkspaceState(workspaceId);
+      if (expandedWorkspaceIds[workspaceId] != null) {
+        const next = { ...expandedWorkspaceIds };
+        delete next[workspaceId];
+        onWorkspaceSidebarExpandedChange(next);
+      }
+    },
+    [
+      expandedWorkspaceIds,
+      onWorkspaceSidebarExpandedChange,
+      removeWorkspace,
+      removeWorkspaceState,
+    ],
+  );
+
   async function handleAddAgent(workspace: (typeof workspaces)[number]) {
     exitDiffView();
     setActiveWorkspaceId(workspace.id);
@@ -544,6 +566,7 @@ function MainApp({
         onAddWorkspace={handleAddWorkspace}
         onConnectWorkspace={connectWorkspace}
         onAddAgent={handleAddAgent}
+        onRemoveWorkspace={handleRemoveWorkspace}
         onSelectThread={handleSelectThread}
         onRenameThread={(workspaceId, threadId, name) => {
           void renameThread(workspaceId, threadId, name);

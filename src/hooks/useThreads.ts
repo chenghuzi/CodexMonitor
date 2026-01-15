@@ -112,6 +112,7 @@ type ThreadAction =
   | { type: "appendReasoningContent"; threadId: string; itemId: string; delta: string }
   | { type: "appendToolOutput"; threadId: string; itemId: string; delta: string }
   | { type: "setThreads"; workspaceId: string; threads: ThreadSummary[] }
+  | { type: "removeWorkspace"; workspaceId: string }
   | { type: "addApproval"; approval: ApprovalRequest }
   | { type: "removeApproval"; requestId: number };
 
@@ -426,6 +427,32 @@ function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
           ...state.threadsByWorkspace,
           [action.workspaceId]: action.threads,
         },
+      };
+    }
+    case "removeWorkspace": {
+      const threads = state.threadsByWorkspace[action.workspaceId] ?? [];
+      const nextThreadsByWorkspace = { ...state.threadsByWorkspace };
+      delete nextThreadsByWorkspace[action.workspaceId];
+      const nextActiveThreadIdByWorkspace = {
+        ...state.activeThreadIdByWorkspace,
+      };
+      delete nextActiveThreadIdByWorkspace[action.workspaceId];
+      const nextItemsByThread = { ...state.itemsByThread };
+      const nextThreadStatusById = { ...state.threadStatusById };
+      for (const thread of threads) {
+        delete nextItemsByThread[thread.id];
+        delete nextThreadStatusById[thread.id];
+      }
+      const nextApprovals = state.approvals.filter(
+        (item) => item.workspace_id !== action.workspaceId,
+      );
+      return {
+        ...state,
+        threadsByWorkspace: nextThreadsByWorkspace,
+        activeThreadIdByWorkspace: nextActiveThreadIdByWorkspace,
+        itemsByThread: nextItemsByThread,
+        threadStatusById: nextThreadStatusById,
+        approvals: nextApprovals,
       };
     }
     default:
@@ -1636,6 +1663,13 @@ export function useThreads({
     [getFallbackThreadName, getSessionStore, persistSessionStore],
   );
 
+  const removeWorkspaceState = useCallback((workspaceId: string) => {
+    dispatch({ type: "removeWorkspace", workspaceId });
+    delete loadedThreads.current[workspaceId];
+    delete threadsByWorkspaceRef.current[workspaceId];
+    delete sessionStoreByWorkspaceRef.current[workspaceId];
+  }, []);
+
   return {
     activeThreadId,
     setActiveThreadId,
@@ -1645,6 +1679,7 @@ export function useThreads({
     threadStatusById: state.threadStatusById,
     renameThread,
     setThreadArchived,
+    removeWorkspaceState,
     startThread,
     startThreadForWorkspace,
     listThreadsForWorkspace,

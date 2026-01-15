@@ -6,6 +6,7 @@ import {
   connectWorkspace as connectWorkspaceService,
   listWorkspaces,
   pickWorkspacePath,
+  removeWorkspace as removeWorkspaceService,
 } from "../services/tauri";
 
 type UseWorkspacesOptions = {
@@ -117,6 +118,38 @@ export function useWorkspaces(options: UseWorkspacesOptions = {}) {
     }
   }
 
+  async function removeWorkspace(workspaceId: string) {
+    onDebug?.({
+      id: `${Date.now()}-client-remove-workspace`,
+      timestamp: Date.now(),
+      source: "client",
+      label: "workspace/remove",
+      payload: { workspaceId },
+    });
+    try {
+      await removeWorkspaceService(workspaceId);
+      const nextWorkspaces = workspaces.filter(
+        (entry) => entry.id !== workspaceId,
+      );
+      const nextActiveId =
+        activeWorkspaceId === workspaceId
+          ? nextWorkspaces[0]?.id ?? null
+          : activeWorkspaceId;
+      setWorkspaces(nextWorkspaces);
+      setActiveWorkspaceId(nextActiveId);
+      return { nextActiveId };
+    } catch (error) {
+      onDebug?.({
+        id: `${Date.now()}-client-remove-workspace-error`,
+        timestamp: Date.now(),
+        source: "error",
+        label: "workspace/remove error",
+        payload: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
   function markWorkspaceConnected(id: string) {
     setWorkspaces((prev) =>
       prev.map((entry) => (entry.id === id ? { ...entry, connected: true } : entry)),
@@ -130,6 +163,7 @@ export function useWorkspaces(options: UseWorkspacesOptions = {}) {
     setActiveWorkspaceId,
     addWorkspace,
     connectWorkspace,
+    removeWorkspace,
     markWorkspaceConnected,
     hasLoaded,
     refreshWorkspaces,

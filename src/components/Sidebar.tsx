@@ -23,6 +23,7 @@ type SidebarProps = {
   onAddWorkspace: () => void;
   onConnectWorkspace: (workspace: WorkspaceInfo) => void;
   onAddAgent: (workspace: WorkspaceInfo) => void;
+  onRemoveWorkspace: (workspace: WorkspaceInfo) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onRenameThread: (workspaceId: string, threadId: string, name: string) => void;
   onArchiveThread: (
@@ -44,6 +45,7 @@ export function Sidebar({
   onAddWorkspace,
   onConnectWorkspace,
   onAddAgent,
+  onRemoveWorkspace,
   onSelectThread,
   onRenameThread,
   onArchiveThread,
@@ -131,6 +133,22 @@ export function Sidebar({
     await menu.popup(position, currentWindow);
   }
 
+  async function showWorkspaceMenu(
+    event: React.MouseEvent,
+    workspace: WorkspaceInfo,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const removeItem = await MenuItem.new({
+      text: "Remove from sidebar",
+      action: () => onRemoveWorkspace(workspace),
+    });
+    const menu = await Menu.new({ items: [removeItem] });
+    const currentWindow = getCurrentWindow();
+    const position = new LogicalPosition(event.clientX, event.clientY);
+    await menu.popup(position, currentWindow);
+  }
+
   return (
     <aside className="sidebar" data-tauri-drag-region>
       <div className="sidebar-header" data-tauri-drag-region>
@@ -166,6 +184,7 @@ export function Sidebar({
                 role="button"
                 tabIndex={0}
                 onClick={() => onToggleWorkspaceExpanded(entry.id)}
+                onContextMenu={(event) => showWorkspaceMenu(event, entry)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();

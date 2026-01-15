@@ -50,6 +50,10 @@ export async function connectWorkspace(id: string): Promise<void> {
   return invoke("connect_workspace", { id });
 }
 
+export async function removeWorkspace(id: string): Promise<void> {
+  return invoke("remove_workspace", { id });
+}
+
 export async function startThread(workspaceId: string) {
   return invoke<any>("start_thread", { workspaceId });
 }

@@ -52,7 +52,7 @@ jobs:
           cargo_toml = "src-tauri/Cargo.toml"
           with open(cargo_toml, "r", encoding="utf-8") as f:
             text = f.read()
-          updated = re.sub(r'(?m)^version\\s*=\\s*\"[^\"]+\"', f'version = \"{version}\"', text, count=1)
+          updated = re.sub(r'(?m)^version\s*=\s*"[^"]+"', f'version = "{version}"', text, count=1)
           if text == updated:
             raise SystemExit("Failed to update Cargo.toml version")
           with open(cargo_toml, "w", encoding="utf-8") as f:
